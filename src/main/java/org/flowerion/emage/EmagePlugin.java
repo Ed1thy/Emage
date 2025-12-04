@@ -27,7 +27,6 @@ public final class EmagePlugin extends JavaPlugin {
     public void onEnable() {
         saveDefaultConfig();
 
-        // Initialize color system
         getLogger().info("Initializing color system...");
         Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
             EmageCore.initColorSystem();
@@ -59,19 +58,15 @@ public final class EmagePlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
-        // Stop renderer
         GifRenderer.stop();
 
-        // Shutdown core
         EmageCore.shutdown();
 
-        // Clear GIF cache
         int cached = GifCache.clearCache();
         if (cached > 0) {
             getLogger().info("Cleared " + cached + " cached GIFs.");
         }
 
-        // Shutdown manager
         if (manager != null) {
             manager.shutdown();
         }

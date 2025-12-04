@@ -14,18 +14,10 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * GIF renderer following ImageFrame's approach:
- * - Sync groups for coordinated playback
- * - Efficient map updates
- * - Proper timing control
- */
 public final class GifRenderer extends MapRenderer {
 
-    // All sync groups (animations sharing same timing)
     private static final Map<Long, SyncGroup> SYNC_GROUPS = new ConcurrentHashMap<>();
 
-    // Map ID to renderer for quick lookup
     private static final Map<Integer, GifRenderer> RENDERERS = new ConcurrentHashMap<>();
 
     private static volatile boolean running = false;
@@ -34,7 +26,6 @@ public final class GifRenderer extends MapRenderer {
 
     private static final AtomicInteger ID_COUNTER = new AtomicInteger(0);
 
-    // Instance fields
     private final int id;
     private final long syncId;
     private final byte[][] frames;
@@ -44,9 +35,6 @@ public final class GifRenderer extends MapRenderer {
     private volatile int lastRenderedFrame = -1;
     private volatile boolean needsRender = true;
 
-    /**
-     * Sync group manages timing for multiple renderers
-     */
     private static class SyncGroup {
         final long syncId;
         final Set<GifRenderer> renderers = ConcurrentHashMap.newKeySet();
@@ -72,7 +60,6 @@ public final class GifRenderer extends MapRenderer {
             this.delays = new int[frameCount];
             long total = 0;
             for (int i = 0; i < frameCount; i++) {
-                // Minimum 50ms per frame for stability
                 int delay = delayList.get(i);
                 delay = Math.max(50, delay);
                 this.delays[i] = delay;
@@ -93,17 +80,12 @@ public final class GifRenderer extends MapRenderer {
             this.active = false;
         }
 
-        /**
-         * Update current frame based on elapsed time
-         * @return true if frame changed
-         */
         boolean tick(long now) {
             if (!active || frameCount <= 1) return false;
 
             long elapsed = now - startTime;
             long cyclePosition = elapsed % totalDuration;
 
-            // Find which frame we should be on
             int targetFrame = 0;
             long accumulated = 0;
             for (int i = 0; i < frameCount; i++) {
@@ -135,8 +117,6 @@ public final class GifRenderer extends MapRenderer {
         }
     }
 
-    // ==================== Static Methods ====================
-
     public static void init(JavaPlugin pl, EmageConfig cfg) {
         plugin = pl;
         config = cfg;
@@ -144,8 +124,6 @@ public final class GifRenderer extends MapRenderer {
         if (running) return;
         running = true;
 
-        // Main animation tick - every 2 ticks (100ms)
-        // ImageFrame uses similar approach
         Bukkit.getScheduler().runTaskTimer(plugin, GifRenderer::tick, 2L, 2L);
     }
 
@@ -155,32 +133,22 @@ public final class GifRenderer extends MapRenderer {
         RENDERERS.clear();
     }
 
-    /**
-     * Main tick - updates all sync groups
-     */
     private static void tick() {
         if (!running || SYNC_GROUPS.isEmpty()) return;
 
         long now = System.currentTimeMillis();
 
-        // Update all sync groups
         for (SyncGroup group : SYNC_GROUPS.values()) {
             group.tick(now);
         }
 
-        // Send map updates to players
         sendMapUpdates();
     }
 
-    /**
-     * Send map updates to nearby players
-     * ImageFrame uses player.sendMap() for each dirty map
-     */
     private static void sendMapUpdates() {
         Collection<? extends Player> players = Bukkit.getOnlinePlayers();
         if (players.isEmpty()) return;
 
-        // Collect all dirty renderers
         List<GifRenderer> dirtyRenderers = new ArrayList<>();
         for (GifRenderer renderer : RENDERERS.values()) {
             if (renderer.needsRender && renderer.mapView != null) {
@@ -190,7 +158,6 @@ public final class GifRenderer extends MapRenderer {
 
         if (dirtyRenderers.isEmpty()) return;
 
-        // Send to each player
         for (Player player : players) {
             if (!player.isOnline()) continue;
 
@@ -202,9 +169,6 @@ public final class GifRenderer extends MapRenderer {
         }
     }
 
-    /**
-     * Start a sync group (call after all maps are applied)
-     */
     public static void startSyncGroup(long syncId) {
         SyncGroup group = SYNC_GROUPS.get(syncId);
         if (group != null) {
@@ -212,9 +176,6 @@ public final class GifRenderer extends MapRenderer {
         }
     }
 
-    /**
-     * Reset sync group timing
-     */
     public static void resetSyncTime(long syncId) {
         SyncGroup group = SYNC_GROUPS.get(syncId);
         if (group != null && group.active) {
@@ -222,30 +183,19 @@ public final class GifRenderer extends MapRenderer {
         }
     }
 
-    /**
-     * Register map location (for distance-based culling if needed)
-     */
-    public static void registerMapLocation(int mapId, Location location) {
-        // Can be used for distance culling in future
-    }
+    public static void registerMapLocation(int mapId, Location location) {}
 
-    /**
-     * Get count of active animated maps
-     */
     public static int getActiveCount() {
         return RENDERERS.size();
     }
 
-    // ==================== Instance Methods ====================
-
     public GifRenderer(List<byte[]> frameList, List<Integer> delays, long syncId) {
-        super(false); // Not contextual
+        super(false);
 
         this.id = ID_COUNTER.incrementAndGet();
         this.syncId = syncId;
         this.frameCount = frameList.size();
 
-        // Copy frame data
         this.frames = new byte[frameCount][];
         for (int i = 0; i < frameCount; i++) {
             byte[] src = frameList.get(i);
@@ -253,7 +203,6 @@ public final class GifRenderer extends MapRenderer {
             System.arraycopy(src, 0, this.frames[i], 0, src.length);
         }
 
-        // Register with sync group
         SyncGroup group = SYNC_GROUPS.computeIfAbsent(syncId, k -> new SyncGroup(syncId, delays));
         group.renderers.add(this);
 
@@ -285,7 +234,6 @@ public final class GifRenderer extends MapRenderer {
 
     @Override
     public void render(MapView map, MapCanvas canvas, Player player) {
-        // Register map view and renderer
         if (this.mapView == null) {
             this.mapView = map;
             @SuppressWarnings("deprecation")
@@ -293,29 +241,24 @@ public final class GifRenderer extends MapRenderer {
             RENDERERS.put(mapId, this);
         }
 
-        // Get current frame from sync group
         SyncGroup group = SYNC_GROUPS.get(syncId);
         int frameIndex = (group != null) ? group.getCurrentFrame() : 0;
 
-        // Bounds check
         if (frameIndex < 0 || frameIndex >= frameCount) {
             frameIndex = 0;
         }
 
-        // Skip if already rendered this frame
         if (frameIndex == lastRenderedFrame && !needsRender) {
             return;
         }
 
-        // Get frame data
         byte[] data = frames[frameIndex];
         if (data == null || data.length < EmageCore.MAP_SIZE) {
             return;
         }
 
-        // Render to canvas
         for (int y = 0; y < 128; y++) {
-            int offset = y << 7; // y * 128
+            int offset = y << 7;
             for (int x = 0; x < 128; x++) {
                 canvas.setPixel(x, y, data[offset + x]);
             }
@@ -325,11 +268,7 @@ public final class GifRenderer extends MapRenderer {
         needsRender = false;
     }
 
-    /**
-     * Remove this renderer and clean up
-     */
     public void remove() {
-        // Remove from sync group
         SyncGroup group = SYNC_GROUPS.get(syncId);
         if (group != null) {
             group.renderers.remove(this);
@@ -338,7 +277,6 @@ public final class GifRenderer extends MapRenderer {
             }
         }
 
-        // Remove from renderer map
         if (mapView != null) {
             @SuppressWarnings("deprecation")
             int mapId = mapView.getId();

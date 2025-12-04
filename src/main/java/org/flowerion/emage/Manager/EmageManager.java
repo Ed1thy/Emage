@@ -168,14 +168,12 @@ public final class EmageManager implements Listener {
         }
 
         void addCell(int mapId, List<byte[]> frames) {
-            // Don't clone here - just reference (saves memory and time)
             cells.put(mapId, frames);
         }
 
         synchronized void scheduleSave() {
             if (saving) return;
             if (saveTask != null) saveTask.cancel(false);
-            // Delay save by 2 seconds to batch multiple cells
             saveTask = scheduler.schedule(this::saveNow, 2000, TimeUnit.MILLISECONDS);
         }
 
@@ -184,7 +182,6 @@ public final class EmageManager implements Listener {
             saving = true;
             pendingAnimGrids.remove(syncId);
 
-            // Clone data for async saving
             final Map<Integer, List<byte[]>> cellsCopy = new HashMap<>();
             for (Map.Entry<Integer, List<byte[]>> entry : cells.entrySet()) {
                 List<byte[]> framesCopy = new ArrayList<>(entry.getValue().size());

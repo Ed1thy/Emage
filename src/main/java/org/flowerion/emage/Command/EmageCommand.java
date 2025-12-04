@@ -31,10 +31,9 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
     private final EmagePlugin plugin;
     private final EmageManager manager;
 
-    // Grid limits
-    private static final int MAX_GIF_GRID = 4;      // Max 4x4 for GIFs
-    private static final int MAX_IMAGE_GRID = 10;   // Max 10x10 for static images
-    private static final int WARN_GIF_CELLS = 9;    // Warn at 3x3 or more
+    private static final int MAX_GIF_GRID = 4;
+    private static final int MAX_IMAGE_GRID = 10;
+    private static final int WARN_GIF_CELLS = 9;
 
     public EmageCommand(EmagePlugin p, EmageManager m) {
         plugin = p;
@@ -184,7 +183,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
             }
         }
 
-        // Parse URL and options
         String urlStr = null;
         Integer reqWidth = null;
         Integer reqHeight = null;
@@ -259,7 +257,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
             try {
                 URL url = new URI(finalUrl).toURL();
 
-                // Check if GIF
                 boolean isGif = finalUrl.toLowerCase().contains(".gif");
                 if (!isGif) {
                     try {
@@ -277,7 +274,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 }
 
                 if (isGif) {
-                    // Check GIF grid limits
                     if (gridWidth > MAX_GIF_GRID || gridHeight > MAX_GIF_GRID) {
                         Bukkit.getScheduler().runTask(plugin, () ->
                                 pl.sendMessage(plugin.colorize(plugin.getPrefix() +
@@ -287,7 +283,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
 
                     int totalCells = gridWidth * gridHeight;
 
-                    // Warn about large grids
                     if (totalCells >= WARN_GIF_CELLS) {
                         Bukkit.getScheduler().runTask(plugin, () ->
                                 pl.sendMessage(plugin.colorize(plugin.getPrefix() +
@@ -297,7 +292,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
 
                     processGif(pl, url, frameNodes, gridWidth, gridHeight, finalQuality, finalNoCache);
                 } else {
-                    // Check image grid limits
                     if (gridWidth > MAX_IMAGE_GRID || gridHeight > MAX_IMAGE_GRID) {
                         Bukkit.getScheduler().runTask(plugin, () ->
                                 pl.sendMessage(plugin.colorize(plugin.getPrefix() +
@@ -434,11 +428,9 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
         String cacheKey = GifCache.createKey(url.toString(), gridWidth, gridHeight, quality);
         int maxFrames = plugin.getEmageConfig().getMaxGifFrames();
 
-        // Check cache first
         EmageCore.GifGridData cachedData = noCache ? null : GifCache.get(cacheKey);
 
         if (cachedData != null) {
-            // Use cached data
             Bukkit.getScheduler().runTask(plugin, () ->
                     player.sendMessage(plugin.colorize(plugin.getPrefix() +
                             "&aUsing cached GIF data! &7(Use &e--nocache &7to reprocess)")));
@@ -447,7 +439,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
             return;
         }
 
-        // Process GIF
         Bukkit.getScheduler().runTask(plugin, () ->
                 player.sendMessage(plugin.msg("processing-gif",
                         "<width>", String.valueOf(gridWidth),
@@ -459,10 +450,8 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
 
         long processTime = System.currentTimeMillis() - startTime;
 
-        // Cache the processed data
         GifCache.put(cacheKey, gifData);
 
-        // Apply to frames
         applyGifData(player, gifData, nodes, gridWidth, gridHeight, processTime);
     }
 
@@ -487,7 +476,6 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 }
             }
 
-            // Start animation after all maps are applied
             GifRenderer.startSyncGroup(syncId);
 
             int frameCount = gifData.grid[0][0] != null ? gifData.grid[0][0].size() : 0;

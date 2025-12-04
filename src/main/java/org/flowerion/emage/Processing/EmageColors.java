@@ -2,15 +2,10 @@ package org.flowerion.emage.Processing;
 
 import java.awt.Color;
 
-/**
- * Minecraft map color palette and matching.
- * Optimized for speed with pre-computed cache.
- */
 public final class EmageColors {
 
     private EmageColors() {}
 
-    // Full Minecraft map palette (1.17+)
     private static final int[][] PALETTE = {
             // 0-3: Transparent
             {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},
@@ -141,35 +136,27 @@ public final class EmageColors {
             {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},
     };
 
-    // Pre-computed Color objects
     private static final Color[] COLORS = new Color[256];
 
-    // Color cache for fast lookup (6-bit per channel = 262144 entries)
     private static final byte[] CACHE = new byte[64 * 64 * 64];
     private static volatile boolean initialized = false;
 
     static {
-        // Initialize Color objects
         for (int i = 0; i < 256; i++) {
             int[] rgb = PALETTE[i];
             COLORS[i] = new Color(rgb[0], rgb[1], rgb[2]);
         }
     }
 
-    /**
-     * Initialize color cache (call once at startup)
-     */
     public static void initCache() {
         if (initialized) return;
 
         synchronized (CACHE) {
             if (initialized) return;
 
-            // Build cache for all 6-bit color combinations
             for (int r = 0; r < 64; r++) {
                 for (int g = 0; g < 64; g++) {
                     for (int b = 0; b < 64; b++) {
-                        // Expand 6-bit to 8-bit
                         int r8 = (r << 2) | (r >> 4);
                         int g8 = (g << 2) | (g >> 4);
                         int b8 = (b << 2) | (b >> 4);
@@ -184,17 +171,12 @@ public final class EmageColors {
         }
     }
 
-    /**
-     * Match RGB to palette color (uses cache if available)
-     */
     public static byte matchColor(int r, int g, int b) {
-        // Clamp values
         r = Math.max(0, Math.min(255, r));
         g = Math.max(0, Math.min(255, g));
         b = Math.max(0, Math.min(255, b));
 
         if (initialized) {
-            // Use cache (6-bit precision)
             int index = ((r >> 2) << 12) | ((g >> 2) << 6) | (b >> 2);
             return CACHE[index];
         }
@@ -202,35 +184,27 @@ public final class EmageColors {
         return findClosestColor(r, g, b);
     }
 
-    /**
-     * Find closest palette color using weighted RGB distance
-     */
     private static byte findClosestColor(int r, int g, int b) {
-        int bestIndex = 4; // Start after transparent colors
+        int bestIndex = 4;
         int bestDistance = Integer.MAX_VALUE;
 
-        // Skip indices 0-3 (transparent)
         for (int i = 4; i < 248; i++) {
             int[] pal = PALETTE[i];
 
-            // Skip unused palette entries
             if (pal[0] == 0 && pal[1] == 0 && pal[2] == 0 && i > 119) {
                 continue;
             }
 
-            // Weighted RGB distance (human eye is more sensitive to green)
             int dr = r - pal[0];
             int dg = g - pal[1];
             int db = b - pal[2];
 
-            // Weight: R=2, G=4, B=1 (approximates human perception)
             int distance = (dr * dr * 2) + (dg * dg * 4) + (db * db);
 
             if (distance < bestDistance) {
                 bestDistance = distance;
                 bestIndex = i;
 
-                // Early exit for exact match
                 if (distance == 0) break;
             }
         }
@@ -238,24 +212,15 @@ public final class EmageColors {
         return (byte) bestIndex;
     }
 
-    /**
-     * Get Color for palette index
-     */
     public static Color getColor(byte index) {
         return COLORS[index & 0xFF];
     }
 
-    /**
-     * Get RGB array for palette index
-     */
     public static int[] getRGB(byte index) {
         int[] rgb = PALETTE[index & 0xFF];
         return new int[]{rgb[0], rgb[1], rgb[2]};
     }
 
-    /**
-     * Check if cache is ready
-     */
     public static boolean isCacheReady() {
         return initialized;
     }

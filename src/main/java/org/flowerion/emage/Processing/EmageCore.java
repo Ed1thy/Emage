@@ -22,7 +22,6 @@ public final class EmageCore {
     public static final int MAP_SIZE = 16384;
     public static final int MAP_WIDTH = 128;
 
-    // Single background thread for processing
     private static final ExecutorService EXECUTOR = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "Emage-Processor");
         t.setDaemon(true);
@@ -30,7 +29,6 @@ public final class EmageCore {
         return t;
     });
 
-    // Simple pool tracking (not actually pooling, just for API compatibility)
     private static volatile boolean usePool = true;
     private static volatile int poolSize = 0;
 
@@ -39,8 +37,6 @@ public final class EmageCore {
         BALANCED,
         HIGH
     }
-
-    // ==================== Pool Methods (for API compatibility) ====================
 
     public static void setUsePool(boolean use) {
         usePool = use;
@@ -54,23 +50,18 @@ public final class EmageCore {
         return poolSize;
     }
 
-    public static void setMaxPoolSize(int size) {
-        // No-op for compatibility
-    }
+    public static void setMaxPoolSize(int size) {}
 
     public static byte[] acquireBuffer() {
         return new byte[MAP_SIZE];
     }
 
     public static void releaseBuffer(byte[] buffer) {
-        // No-op
     }
 
     public static void clearAllPools() {
         poolSize = 0;
     }
-
-    // ==================== Color Methods ====================
 
     public static void initColorSystem() {
         EXECUTOR.submit(EmageColors::initCache);
@@ -88,11 +79,6 @@ public final class EmageCore {
         return Math.max(0, Math.min(255, value));
     }
 
-    // ==================== Image Resize ====================
-
-    /**
-     * Resize an image to the specified dimensions.
-     */
     public static BufferedImage resize(BufferedImage src, int width, int height) {
         if (src.getWidth() == width && src.getHeight() == height) {
             return src;
@@ -106,8 +92,6 @@ public final class EmageCore {
         g.dispose();
         return dest;
     }
-
-    // ==================== Image Processing ====================
 
     public static byte[] dither(BufferedImage img) {
         return dither(img, Quality.BALANCED);
@@ -138,8 +122,6 @@ public final class EmageCore {
         g.dispose();
         return dest;
     }
-
-    // ==================== Ordered Dithering ====================
 
     private static final int[][] BAYER_4X4 = {
             { 0,  8,  2, 10},
@@ -172,8 +154,6 @@ public final class EmageCore {
 
         return result;
     }
-
-    // ==================== Floyd-Steinberg Dithering ====================
 
     private static byte[] ditherFloydSteinberg(int[] pixels) {
         byte[] result = new byte[MAP_SIZE];
@@ -232,20 +212,14 @@ public final class EmageCore {
         return result;
     }
 
-    // ==================== GIF Processing ====================
-
     public static GifGridData processGifGrid(URL url, int gridW, int gridH, int maxFrames) throws Exception {
         return processGifGrid(url, gridW, gridH, maxFrames, Quality.BALANCED);
     }
 
-    /**
-     * Process GIF sequentially but efficiently.
-     */
     public static GifGridData processGifGrid(URL url, int gridW, int gridH, int maxFrames, Quality quality) throws Exception {
         int totalW = gridW * MAP_WIDTH;
         int totalH = gridH * MAP_WIDTH;
 
-        // Read all frames
         GifData gifData = readGif(url, maxFrames);
         if (gifData.frames.isEmpty()) {
             throw new Exception("No frames found in GIF");
@@ -253,7 +227,6 @@ public final class EmageCore {
 
         int frameCount = gifData.frames.size();
 
-        // Initialize grid
         @SuppressWarnings("unchecked")
         List<byte[]>[][] grid = new List[gridW][gridH];
         for (int gx = 0; gx < gridW; gx++) {
@@ -262,42 +235,33 @@ public final class EmageCore {
             }
         }
 
-        // Reusable buffers
         int[] allPixels = new int[totalW * totalH];
         int[] chunkPixels = new int[MAP_SIZE];
 
-        // Process frames one at a time
         for (int f = 0; f < frameCount; f++) {
             BufferedImage frame = gifData.frames.get(f);
 
-            // Resize frame
             BufferedImage resized = resize(frame, totalW, totalH);
 
-            // Get all pixels
             resized.getRGB(0, 0, totalW, totalH, allPixels, 0, totalW);
 
-            // Process each grid cell
             for (int gy = 0; gy < gridH; gy++) {
                 for (int gx = 0; gx < gridW; gx++) {
                     int startX = gx * MAP_WIDTH;
                     int startY = gy * MAP_WIDTH;
 
-                    // Extract chunk
                     for (int cy = 0; cy < MAP_WIDTH; cy++) {
                         System.arraycopy(allPixels, (startY + cy) * totalW + startX,
                                 chunkPixels, cy * MAP_WIDTH, MAP_WIDTH);
                     }
 
-                    // Dither
                     byte[] dithered = ditherPixels(chunkPixels, quality);
                     grid[gx][gy].add(dithered);
                 }
             }
 
-            // Clear frame reference to help GC
             gifData.frames.set(f, null);
 
-            // Yield occasionally to prevent blocking
             if ((f & 7) == 7) {
                 Thread.yield();
             }
@@ -330,7 +294,6 @@ public final class EmageCore {
             int canvasWidth = 0;
             int canvasHeight = 0;
 
-            // Get canvas size from stream metadata
             try {
                 IIOMetadata streamMeta = reader.getStreamMetadata();
                 if (streamMeta != null) {
@@ -369,7 +332,6 @@ public final class EmageCore {
                 }
                 if (rawFrame == null) break;
 
-                // Read metadata
                 int delay = 50;
                 String disposal = "none";
                 int frameX = 0, frameY = 0;
@@ -405,19 +367,15 @@ public final class EmageCore {
                     }
                 } catch (Exception ignored) {}
 
-                // Save canvas if needed
                 if ("restoreToPrevious".equalsIgnoreCase(disposal)) {
                     restoreCanvas = copyImage(canvas);
                 }
 
-                // Draw frame
                 canvasG.drawImage(rawFrame, frameX, frameY, null);
 
-                // Store frame
                 frames.add(copyImage(canvas));
                 delays.add(Math.max(20, delay));
 
-                // Handle disposal
                 if ("restoreToBackgroundColor".equalsIgnoreCase(disposal)) {
                     canvasG.setComposite(AlphaComposite.Clear);
                     canvasG.fillRect(frameX, frameY, frameW, frameH);
@@ -443,8 +401,6 @@ public final class EmageCore {
         g.dispose();
         return copy;
     }
-
-    // ==================== Compression ====================
 
     public static byte[] compressMap(byte[] data) {
         return EmageCompression.compressSingleStatic(data);
@@ -482,8 +438,6 @@ public final class EmageCore {
             EXECUTOR.shutdownNow();
         }
     }
-
-    // ==================== Data Classes ====================
 
     private static class GifData {
         final List<BufferedImage> frames;
