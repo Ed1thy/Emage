@@ -1,6 +1,6 @@
 # Emage 🎨
 
-**Emage** is a high-performance Minecraft plugin that displays images and animated GIFs on item frames. It features automatic grid detection, high-quality dithering, advanced compression, and smooth 60 FPS animation playback.
+**Emage** is a high-performance Minecraft plugin that displays images and animated GIFs on item frames. It features automatic grid detection, high-quality dithering, advanced compression, and smooth animation playback.
 
 [![Modrinth](https://img.shields.io/modrinth/dt/emage?logo=modrinth&label=Modrinth&color=00AF5C)](https://modrinth.com/plugin/emage)
 [![SpigotMC](https://img.shields.io/badge/SpigotMC-Download-orange)](https://www.spigotmc.org/resources/emage.130410/)
@@ -8,33 +8,58 @@
 
 ---
 
+> ## ⚠️ GIF Support - Experimental
+>
+> **Animated GIF support is experimental and may cause performance issues!**
+>
+> ### Known Limitations
+> | Issue | Description |
+> |:------|:------------|
+> | **Grid Size** | Maximum 4x4 for GIFs (3x3 or smaller recommended) |
+> | **Processing Time** | Large GIFs may take 5-15 seconds to process |
+> | **Network Usage** | Each animated map sends ~16KB per frame update to nearby players |
+> | **CPU Usage** | Multiple animated GIFs will increase server CPU usage |
+> | **Player Lag** | Players with slow connections may experience timeout issues with large GIF grids |
+>
+> ### Recommendations
+> | Do ✅ | Don't ❌ |
+> |:------|:---------|
+> | Use **1x1 or 2x2** grids for GIFs | Avoid 4x4 GIF grids unless necessary |
+> | Keep GIF frame count under **50 frames** | Don't place multiple large GIF displays near each other |
+> | Use `--fast` quality for better performance | Don't use `--high` quality for large GIFs |
+> | Limit the number of active GIFs on your server | Don't ignore lag warnings |
+>
+> **Static images (PNG, JPG, WebP) are fully stable and recommended for large displays.**
+
+---
+
 ## ✨ Features
 
 ### Image Display
-- **🖼️ Static Images** - Display any PNG, JPG, or WebP image from the web
-- **🎬 Animated GIFs** - Full GIF support with smooth playback and frame synchronization
-- **🧩 Grid Support** - Automatically detects connected item frames (up to 15x15)
-- **📐 Auto-Scaling** - Automatically fills detected frame grid or specify custom dimensions
+- 🖼️ **Static Images** - Display any PNG, JPG, or WebP image from the web
+- 🎬 **Animated GIFs** - GIF support with smooth playback and frame synchronization *(⚠️ EXPERIMENTAL)*
+- 🧩 **Grid Support** - Automatically detects connected item frames (up to 10x10 for images, 4x4 for GIFs)
+- 📐 **Auto-Scaling** - Automatically fills detected frame grid or specify custom dimensions
 
 ### Quality & Processing
-- **🎨 Advanced Dithering** - Floyd-Steinberg dithering with edge-aware error diffusion
-- **🔍 Smart Sharpening** - Unsharp mask sharpening to counteract resize blur
-- **🖌️ Edge Enhancement** - Laplacian edge enhancement for crisp details on maps
-- **📊 Three Quality Modes** - Fast, Balanced, and High quality options
+- 🎨 **Advanced Dithering** - Floyd-Steinberg dithering with edge-aware error diffusion
+- 🔍 **Smart Sharpening** - Unsharp mask sharpening to counteract resize blur
+- 🖌️ **Edge Enhancement** - Laplacian edge enhancement for crisp details on maps
+- 📊 **Three Quality Modes** - Fast, Balanced, and High quality options
 
 ### Performance
-- **🚀 Zero Lag** - All image processing happens asynchronously on worker threads
-- **⚡ Distance-Based FPS** - 60 FPS when close, 20 FPS when far away
-- **🎯 Adaptive Performance** - Automatically adjusts quality based on server load
-- **👁️ Proximity Tracking** - Only updates animations for nearby players
-- **🔄 SyncGroup System** - Entire grids share single frame calculation
-- **💾 Memory Pooling** - Reuses buffers to reduce garbage collection
+- 🚀 **Zero Lag** - All image processing happens asynchronously on worker threads
+- ⚡ **Distance-Based Updates** - Only updates animations for nearby players
+- 🎯 **Adaptive Performance** - Automatically adjusts quality based on server load
+- 💾 **GIF Caching** - Processed GIFs are cached to avoid reprocessing
+- 🔄 **SyncGroup System** - Entire grids share single frame calculation
+- 🧠 **Memory Pooling** - Reuses buffers to reduce garbage collection
 
 ### Storage & Persistence
-- **💾 Persistent Storage** - Images survive server restarts
-- **📦 Advanced Compression** - Up to 90% smaller files with palette reduction and delta encoding
-- **🗂️ Grid Files** - Multiple maps stored in single compressed files
-- **🧹 Cleanup Tools** - Automatically remove unused map files
+- 💾 **Persistent Storage** - Images survive server restarts
+- 📦 **Advanced Compression** - Up to 90% smaller files with palette reduction and delta encoding
+- 🗂️ **Grid Files** - Multiple maps stored in single compressed files
+- 🧹 **Cleanup Tools** - Automatically remove unused map files
 
 ---
 
@@ -46,23 +71,42 @@
 
 ---
 
-| Command                         | Description                       | Permission    |
-|:--------------------------------|:----------------------------------|:--------------|
-| `/emage <url> [size] [quality]` | Upload an image onto item frames  | `emage.use`   |
-| `/emage help`                   | Show information about the plugin | `emage.use`   |
-| `/emage reload`                 | Reload the plugin                 | `emage.admin` |
-| `/emage cleanup`                | Remove unused map files           | `emage.admin` |
-| `/emage stats`                  | View storage statistics           | `emage.admin` |
-| `/emage perf`                   | View performance statistics       | `emage.admin` |
-| `/emage migrate`                | Convert legacy format files       | `emage.admin` |
-| `/emage update`                 | Check for updates                 | `emage.admin` |
+## 📋 Commands
 
+| Command | Description | Permission |
+|:--------|:------------|:-----------|
+| `/emage <url> [size] [quality]` | Upload an image onto item frames | `emage.use` |
+| `/emage help` | Show information about the plugin | `emage.use` |
+| `/emage reload` | Reload the plugin | `emage.admin` |
+| `/emage cleanup` | Remove unused map files | `emage.admin` |
+| `/emage stats` | View storage statistics | `emage.admin` |
+| `/emage perf` | View performance statistics | `emage.admin` |
+| `/emage cache` | View GIF cache statistics | `emage.admin` |
+| `/emage clearcache` | Clear the GIF cache | `emage.admin` |
+| `/emage migrate` | Convert legacy format files | `emage.admin` |
+| `/emage update` | Check for updates | `emage.admin` |
 
-| Flag         | Aliases             |
-|:-------------|:--------------------|
-| `--fast`     | -f, --low, --speed  |
-| `--balanced` | -b, --normal        |
-| `--high`     | -h, --hq, --quality |
+---
+
+## 🎛️ Flags
+
+| Flag | Aliases | Description |
+|:-----|:--------|:------------|
+| `--fast` | `-f`, `--low`, `--speed` | Fastest processing, lower quality |
+| `--balanced` | `-b`, `--normal` | Default quality (recommended) |
+| `--high` | `-h`, `--hq`, `--quality` | Best quality, slower processing |
+| `--nocache` | `--nc`, `--fresh` | Force reprocess GIF (ignore cache) |
+
+---
+
+## 📏 Grid Size Limits
+
+| Content Type | Maximum Size | Recommended |
+|:-------------|:-------------|:------------|
+| Static Images | 10x10 (100 maps) | Any size |
+| Animated GIFs | 4x4 (16 maps) | 2x2 or smaller |
+
+---
 
 ## 📥 Installation
 
@@ -90,16 +134,18 @@
 # Force specific grid size
 /emage https://example.com/image.png 3x3
 
-# Display animated GIF
-/emage https://example.com/animation.gif
+# Display animated GIF (keep it small!)
+/emage https://example.com/animation.gif 2x2
 
-# High quality mode
+# High quality static image
 /emage https://example.com/photo.jpg --high
 
-# Fast processing mode
-/emage https://example.com/image.png 5x5 --fast
-```
+# Fast GIF processing (recommended for GIFs)
+/emage https://example.com/animation.gif 2x2 --fast
 
+# Force reprocess a cached GIF
+/emage https://example.com/animation.gif --nocache
+```
 
 ### 🐛 Reporting Issues
 Found a bug? Please report it on [GitHub Issues](https://github.com/EdithyLikesToCode/Emage/issues/new/choose) with:

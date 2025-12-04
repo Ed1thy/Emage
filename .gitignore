@@ -13,7 +13,6 @@ $RECYCLE.BIN/
 *.bak
 *.swp
 *.swo
-*~
 .env
 .env.local
 secrets.yml

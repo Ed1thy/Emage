@@ -1,4 +1,4 @@
-package org.flowerion.emage;
+package org.flowerion.emage.Manager;
 
 import org.bukkit.Bukkit;
 import org.bukkit.event.EventHandler;
@@ -8,6 +8,10 @@ import org.bukkit.event.server.MapInitializeEvent;
 import org.bukkit.event.world.WorldLoadEvent;
 import org.bukkit.map.MapView;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.flowerion.emage.Config.EmageConfig;
+import org.flowerion.emage.Processing.EmageCompression;
+import org.flowerion.emage.Render.EmageRenderer;
+import org.flowerion.emage.Render.GifRenderer;
 
 import java.io.*;
 import java.nio.file.Files;
@@ -164,17 +168,15 @@ public final class EmageManager implements Listener {
         }
 
         void addCell(int mapId, List<byte[]> frames) {
-            List<byte[]> copy = new ArrayList<>(frames.size());
-            for (byte[] frame : frames) {
-                copy.add(frame.clone());
-            }
-            cells.put(mapId, copy);
+            // Don't clone here - just reference (saves memory and time)
+            cells.put(mapId, frames);
         }
 
         synchronized void scheduleSave() {
             if (saving) return;
             if (saveTask != null) saveTask.cancel(false);
-            saveTask = scheduler.schedule(this::saveNow, 500, TimeUnit.MILLISECONDS);
+            // Delay save by 2 seconds to batch multiple cells
+            saveTask = scheduler.schedule(this::saveNow, 2000, TimeUnit.MILLISECONDS);
         }
 
         synchronized void saveNow() {
@@ -182,18 +184,29 @@ public final class EmageManager implements Listener {
             saving = true;
             pendingAnimGrids.remove(syncId);
 
+            // Clone data for async saving
+            final Map<Integer, List<byte[]>> cellsCopy = new HashMap<>();
+            for (Map.Entry<Integer, List<byte[]>> entry : cells.entrySet()) {
+                List<byte[]> framesCopy = new ArrayList<>(entry.getValue().size());
+                for (byte[] frame : entry.getValue()) {
+                    byte[] copy = new byte[frame.length];
+                    System.arraycopy(frame, 0, copy, 0, frame.length);
+                    framesCopy.add(copy);
+                }
+                cellsCopy.put(entry.getKey(), framesCopy);
+            }
+            final List<Integer> delaysCopy = new ArrayList<>(delays);
+
             ioExecutor.submit(() -> {
                 try {
-                    byte[] compressed = EmageCompression.compressAnimGrid(cells, delays, syncId);
+                    byte[] compressed = EmageCompression.compressAnimGrid(cellsCopy, delaysCopy, syncId);
                     File file = new File(mapsFolder, "anim_" + syncId + ".eagrid");
-                    Files.write(file.toPath(), compressed);
+                    java.nio.file.Files.write(file.toPath(), compressed);
 
-                    int frameCount = cells.isEmpty() ? 0 : cells.values().iterator().next().size();
-                    int rawSize = cells.size() * frameCount * 16384;
-                    plugin.getLogger().info("Saved anim grid: " + cells.size() + " cells, " +
-                            frameCount + " frames, " + formatSize(rawSize) + " -> " + formatSize(compressed.length));
+                    int frameCount = cellsCopy.isEmpty() ? 0 : cellsCopy.values().iterator().next().size();
+                    plugin.getLogger().info("Saved animation: " + cellsCopy.size() + " cells, " + frameCount + " frames");
                 } catch (Exception e) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to save anim grid " + syncId, e);
+                    plugin.getLogger().log(java.util.logging.Level.WARNING, "Failed to save animation " + syncId, e);
                 }
             });
         }

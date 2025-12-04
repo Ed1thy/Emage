@@ -1,4 +1,4 @@
-package org.flowerion.emage;
+package org.flowerion.emage.Util;
 
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;

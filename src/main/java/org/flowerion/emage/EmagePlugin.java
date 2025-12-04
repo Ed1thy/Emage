@@ -3,6 +3,13 @@ package org.flowerion.emage;
 import org.bukkit.Bukkit;
 import org.bukkit.ChatColor;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.flowerion.emage.Command.EmageCommand;
+import org.flowerion.emage.Config.EmageConfig;
+import org.flowerion.emage.Manager.EmageManager;
+import org.flowerion.emage.Processing.EmageCore;
+import org.flowerion.emage.Render.GifRenderer;
+import org.flowerion.emage.Util.GifCache;
+import org.flowerion.emage.Util.UpdateChecker;
 
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -19,6 +26,13 @@ public final class EmagePlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
+
+        // Initialize color system
+        getLogger().info("Initializing color system...");
+        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
+            EmageCore.initColorSystem();
+            getLogger().info("Color system initialized.");
+        });
 
         emageConfig = new EmageConfig(this);
 
@@ -45,9 +59,19 @@ public final class EmagePlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        // Stop renderer
         GifRenderer.stop();
+
+        // Shutdown core
         EmageCore.shutdown();
 
+        // Clear GIF cache
+        int cached = GifCache.clearCache();
+        if (cached > 0) {
+            getLogger().info("Cleared " + cached + " cached GIFs.");
+        }
+
+        // Shutdown manager
         if (manager != null) {
             manager.shutdown();
         }
@@ -87,9 +111,9 @@ public final class EmagePlugin extends JavaPlugin {
 
     private String getHardcodedMessage(String key) {
         return switch (key) {
-            case "usage" -> PREFIX + "&cUsage: /emage [url] [width]x[height]";
+            case "usage" -> PREFIX + "&cUsage: /emage <url> [size] [--quality]";
             case "no-frame" -> PREFIX + "&cPlease look at an Item Frame!";
-            case "invalid-size" -> PREFIX + "&cInvalid size. Please use '3x3' or '3' (max 15x15)";
+            case "invalid-size" -> PREFIX + "&cInvalid size! Use format: 3x3 or just 3";
             case "invalid-url" -> PREFIX + "&cPlease provide a valid URL";
             case "no-perm" -> PREFIX + "&cYou don't have permission to do that!";
             case "error" -> PREFIX + "&cFailed to load image: &7<error>";
@@ -97,7 +121,7 @@ public final class EmagePlugin extends JavaPlugin {
             case "help-header" -> "&7&m----------&r &6Emage Help &7&m----------";
             case "help-url" -> "&6/emage <url> [size] &7- &fApply image to item frames";
             case "help-quality" -> "&7  Quality: &e--fast&7, &e--balanced&7, &e--high";
-            case "help-aliases" -> "&7  Aliases: &e-f&7, &e--low&7, &e--speed &7| &e-b&7, &e--normal &7| &e-h&7, &e--hq&7, &e--quality";
+            case "help-aliases" -> "&7  Flags: &e-f&7, &e-b&7, &e-h&7, &e--nocache";
             case "help-migrate" -> "&6/emage migrate &7- &fConvert old format files";
             case "help-reload" -> "&6/emage reload &7- &fReload configuration";
             case "help-cleanup" -> "&6/emage cleanup &7- &fDelete unused map files";

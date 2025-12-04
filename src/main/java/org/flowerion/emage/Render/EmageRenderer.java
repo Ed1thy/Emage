@@ -1,4 +1,4 @@
-package org.flowerion.emage;
+package org.flowerion.emage.Render;
 
 import org.bukkit.entity.Player;
 import org.bukkit.map.MapCanvas;

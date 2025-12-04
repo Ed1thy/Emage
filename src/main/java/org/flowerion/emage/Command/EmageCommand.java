@@ -1,4 +1,4 @@
-package org.flowerion.emage;
+package org.flowerion.emage.Command;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -11,6 +11,14 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.MapMeta;
 import org.bukkit.map.MapView;
 import org.bukkit.util.RayTraceResult;
+import org.flowerion.emage.*;
+import org.flowerion.emage.Config.EmageConfig;
+import org.flowerion.emage.Manager.EmageManager;
+import org.flowerion.emage.Processing.EmageCore;
+import org.flowerion.emage.Render.EmageRenderer;
+import org.flowerion.emage.Render.GifRenderer;
+import org.flowerion.emage.Util.GifCache;
+import org.flowerion.emage.Util.UpdateChecker;
 
 import javax.imageio.ImageIO;
 import java.awt.image.BufferedImage;
@@ -22,6 +30,11 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
 
     private final EmagePlugin plugin;
     private final EmageManager manager;
+
+    // Grid limits
+    private static final int MAX_GIF_GRID = 4;      // Max 4x4 for GIFs
+    private static final int MAX_IMAGE_GRID = 10;   // Max 10x10 for static images
+    private static final int WARN_GIF_CELLS = 9;    // Warn at 3x3 or more
 
     public EmageCommand(EmagePlugin p, EmageManager m) {
         plugin = p;
@@ -53,6 +66,27 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 plugin.reloadConfig();
                 plugin.getEmageConfig().reload();
                 pl.sendMessage(plugin.msg("reloaded"));
+                return true;
+            }
+            case "clearcache" -> {
+                if (!pl.hasPermission("emage.admin")) {
+                    pl.sendMessage(plugin.hardcodedMsg("no-perm"));
+                    return true;
+                }
+                int cleared = GifCache.clearCache();
+                pl.sendMessage(plugin.colorize(plugin.getPrefix() + "&aCleared &e" + cleared + " &acached GIFs."));
+                return true;
+            }
+            case "cache" -> {
+                if (!pl.hasPermission("emage.admin")) {
+                    pl.sendMessage(plugin.hardcodedMsg("no-perm"));
+                    return true;
+                }
+                GifCache.CacheStats stats = GifCache.getStats();
+                pl.sendMessage(plugin.colorize(plugin.getPrefix() + "&7GIF Cache:"));
+                pl.sendMessage(plugin.colorize("&8 • &7Cached GIFs: &b" + stats.count));
+                pl.sendMessage(plugin.colorize("&8 • &7Memory: &b" + stats.formattedSize));
+                pl.sendMessage(plugin.colorize("&8 • &7Hit rate: &b" + String.format("%.1f%%", stats.hitRate * 100)));
                 return true;
             }
             case "migrate" -> {
@@ -138,20 +172,24 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 }
                 EmageConfig cfg = plugin.getEmageConfig();
                 EmageManager.MapStats stats = manager.getStats();
+                GifCache.CacheStats cacheStats = GifCache.getStats();
 
                 pl.sendMessage(plugin.getPrefix() + "&7Performance Status:");
                 pl.sendMessage(plugin.colorize("&8 • &7" + stats.performanceStatus));
                 pl.sendMessage(plugin.colorize("&8 • &7Active animations: &b" + GifRenderer.getActiveCount()));
-                pl.sendMessage(plugin.colorize("&8 • &7Memory pool: &b" + EmageCore.getPoolSize() + " buffers"));
+                pl.sendMessage(plugin.colorize("&8 • &7GIF cache: &b" + cacheStats.count + " &7(&b" + cacheStats.formattedSize + "&7)"));
+                pl.sendMessage(plugin.colorize("&8 • &7Cache hit rate: &b" + String.format("%.1f%%", cacheStats.hitRate * 100)));
                 pl.sendMessage(plugin.colorize("&8 • &7Render distance: &b" + cfg.getRenderDistance() + " blocks"));
                 return true;
             }
         }
 
+        // Parse URL and options
         String urlStr = null;
         Integer reqWidth = null;
         Integer reqHeight = null;
         EmageCore.Quality quality = EmageCore.Quality.BALANCED;
+        boolean noCache = false;
 
         for (String arg : args) {
             if (arg.startsWith("http://") || arg.startsWith("https://")) {
@@ -162,6 +200,7 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                     case "high", "hq", "quality", "h" -> quality = EmageCore.Quality.HIGH;
                     case "balanced", "bal", "b", "normal" -> quality = EmageCore.Quality.BALANCED;
                     case "fast", "low", "f", "l", "speed" -> quality = EmageCore.Quality.FAST;
+                    case "nocache", "nc", "fresh" -> noCache = true;
                 }
             } else if (arg.contains("x") || arg.matches("\\d+")) {
                 try {
@@ -174,8 +213,7 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                         reqHeight = reqWidth;
                     }
 
-                    int maxSize = plugin.getEmageConfig().getMaxGridSize();
-                    if (reqWidth < 1 || reqHeight < 1 || reqWidth > maxSize || reqHeight > maxSize) {
+                    if (reqWidth < 1 || reqHeight < 1) {
                         pl.sendMessage(plugin.hardcodedMsg("invalid-size"));
                         return true;
                     }
@@ -215,11 +253,13 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
         final List<FrameNode> frameNodes = new ArrayList<>(grid.nodes);
         final EmageCore.Quality finalQuality = quality;
         final String finalUrl = urlStr;
+        final boolean finalNoCache = noCache;
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
                 URL url = new URI(finalUrl).toURL();
 
+                // Check if GIF
                 boolean isGif = finalUrl.toLowerCase().contains(".gif");
                 if (!isGif) {
                     try {
@@ -237,8 +277,34 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 }
 
                 if (isGif) {
-                    processGif(pl, url, frameNodes, gridWidth, gridHeight, finalQuality);
+                    // Check GIF grid limits
+                    if (gridWidth > MAX_GIF_GRID || gridHeight > MAX_GIF_GRID) {
+                        Bukkit.getScheduler().runTask(plugin, () ->
+                                pl.sendMessage(plugin.colorize(plugin.getPrefix() +
+                                        "&cGIF grid too large! Maximum is &e" + MAX_GIF_GRID + "x" + MAX_GIF_GRID + "&c.")));
+                        return;
+                    }
+
+                    int totalCells = gridWidth * gridHeight;
+
+                    // Warn about large grids
+                    if (totalCells >= WARN_GIF_CELLS) {
+                        Bukkit.getScheduler().runTask(plugin, () ->
+                                pl.sendMessage(plugin.colorize(plugin.getPrefix() +
+                                        "&eWarning: &7Large GIF grid (&e" + gridWidth + "x" + gridHeight +
+                                        "&7) may cause lag. Processing...")));
+                    }
+
+                    processGif(pl, url, frameNodes, gridWidth, gridHeight, finalQuality, finalNoCache);
                 } else {
+                    // Check image grid limits
+                    if (gridWidth > MAX_IMAGE_GRID || gridHeight > MAX_IMAGE_GRID) {
+                        Bukkit.getScheduler().runTask(plugin, () ->
+                                pl.sendMessage(plugin.colorize(plugin.getPrefix() +
+                                        "&cImage grid too large! Maximum is &e" + MAX_IMAGE_GRID + "x" + MAX_IMAGE_GRID + "&c.")));
+                        return;
+                    }
+
                     processStaticImage(pl, url, frameNodes, gridWidth, gridHeight, finalQuality);
                 }
 
@@ -272,15 +338,11 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                                         mapsInUse.add(id);
                                     }
                                 }
-                            } catch (Exception e) {
-                                plugin.getLogger().fine("Could not read map from item frame: " + e.getMessage());
-                            }
+                            } catch (Exception ignored) {}
                         }
                     }
                 }
-            } catch (Exception e) {
-                plugin.getLogger().warning("Error scanning world " + world.getName() + ": " + e.getMessage());
-            }
+            } catch (Exception ignored) {}
         }
 
         for (Player player : Bukkit.getOnlinePlayers()) {
@@ -303,16 +365,18 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
             } catch (Exception ignored) {}
         }
 
-        plugin.getLogger().info("Found " + mapsInUse.size() + " maps currently in use");
-
         return mapsInUse;
     }
 
     private void sendHelp(Player player) {
         player.sendMessage(plugin.hardcodedMsg("help-header"));
         player.sendMessage(plugin.hardcodedMsg("help-url"));
+        player.sendMessage(plugin.colorize("&7  Limits: GIF &e" + MAX_GIF_GRID + "x" + MAX_GIF_GRID +
+                "&7, Image &e" + MAX_IMAGE_GRID + "x" + MAX_IMAGE_GRID));
         player.sendMessage(plugin.hardcodedMsg("help-quality"));
         player.sendMessage(plugin.hardcodedMsg("help-aliases"));
+        player.sendMessage(plugin.colorize("&6/emage clearcache &7- &fClear GIF processing cache"));
+        player.sendMessage(plugin.colorize("&6/emage cache &7- &fView cache statistics"));
         player.sendMessage(plugin.hardcodedMsg("help-cleanup"));
         player.sendMessage(plugin.hardcodedMsg("help-stats"));
         player.sendMessage(plugin.hardcodedMsg("help-perf"));
@@ -364,8 +428,26 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
     }
 
     private void processGif(Player player, URL url, List<FrameNode> nodes,
-                            int gridWidth, int gridHeight, EmageCore.Quality quality) throws Exception {
+                            int gridWidth, int gridHeight, EmageCore.Quality quality,
+                            boolean noCache) throws Exception {
 
+        String cacheKey = GifCache.createKey(url.toString(), gridWidth, gridHeight, quality);
+        int maxFrames = plugin.getEmageConfig().getMaxGifFrames();
+
+        // Check cache first
+        EmageCore.GifGridData cachedData = noCache ? null : GifCache.get(cacheKey);
+
+        if (cachedData != null) {
+            // Use cached data
+            Bukkit.getScheduler().runTask(plugin, () ->
+                    player.sendMessage(plugin.colorize(plugin.getPrefix() +
+                            "&aUsing cached GIF data! &7(Use &e--nocache &7to reprocess)")));
+
+            applyGifData(player, cachedData, nodes, gridWidth, gridHeight, 0);
+            return;
+        }
+
+        // Process GIF
         Bukkit.getScheduler().runTask(plugin, () ->
                 player.sendMessage(plugin.msg("processing-gif",
                         "<width>", String.valueOf(gridWidth),
@@ -373,16 +455,23 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
 
         long startTime = System.currentTimeMillis();
 
-        long syncId = System.currentTimeMillis();
-
-        int maxFrames = plugin.getEmageConfig().getMaxGifFrames();
         EmageCore.GifGridData gifData = EmageCore.processGifGrid(url, gridWidth, gridHeight, maxFrames, quality);
 
         long processTime = System.currentTimeMillis() - startTime;
 
-        Bukkit.getScheduler().runTask(plugin, () -> {
-            GifRenderer.resetSyncTime(syncId);
+        // Cache the processed data
+        GifCache.put(cacheKey, gifData);
 
+        // Apply to frames
+        applyGifData(player, gifData, nodes, gridWidth, gridHeight, processTime);
+    }
+
+    private void applyGifData(Player player, EmageCore.GifGridData gifData, List<FrameNode> nodes,
+                              int gridWidth, int gridHeight, long processTime) {
+
+        long syncId = System.currentTimeMillis();
+
+        Bukkit.getScheduler().runTask(plugin, () -> {
             int applied = 0;
 
             for (FrameNode node : nodes) {
@@ -398,11 +487,20 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 }
             }
 
+            // Start animation after all maps are applied
+            GifRenderer.startSyncGroup(syncId);
+
             int frameCount = gifData.grid[0][0] != null ? gifData.grid[0][0].size() : 0;
-            player.sendMessage(plugin.msg("success-gif",
-                    "<total>", String.valueOf(applied),
-                    "<frames>", String.valueOf(frameCount),
-                    "<time>", String.valueOf(processTime)));
+
+            if (processTime > 0) {
+                player.sendMessage(plugin.msg("success-gif",
+                        "<total>", String.valueOf(applied),
+                        "<frames>", String.valueOf(frameCount),
+                        "<time>", String.valueOf(processTime)));
+            } else {
+                player.sendMessage(plugin.colorize(plugin.getPrefix() +
+                        "&aApplied &e" + applied + " &amaps with &e" + frameCount + " &aframes. &7(from cache)"));
+            }
         });
     }
 
@@ -487,6 +585,8 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
             if ("help".startsWith(lastArg)) suggestions.add("help");
             if (sender.hasPermission("emage.admin")) {
                 if ("cleanup".startsWith(lastArg)) suggestions.add("cleanup");
+                if ("clearcache".startsWith(lastArg)) suggestions.add("clearcache");
+                if ("cache".startsWith(lastArg)) suggestions.add("cache");
                 if ("stats".startsWith(lastArg)) suggestions.add("stats");
                 if ("perf".startsWith(lastArg)) suggestions.add("perf");
                 if ("migrate".startsWith(lastArg)) suggestions.add("migrate");
@@ -504,6 +604,7 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
             if ("--high".startsWith(lastArg)) suggestions.add("--high");
             if ("--balanced".startsWith(lastArg)) suggestions.add("--balanced");
             if ("--fast".startsWith(lastArg)) suggestions.add("--fast");
+            if ("--nocache".startsWith(lastArg)) suggestions.add("--nocache");
         }
 
         return suggestions;
