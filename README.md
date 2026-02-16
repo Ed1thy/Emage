@@ -11,18 +11,18 @@ A Minecraft plugin for displaying images and animated GIFs on item frames. Suppo
 
 ## Features
 
-- **Static images** — PNG, JPG, and any format supported by Java's ImageIO. Rendered with Floyd-Steinberg dithering by default.
-- **Animated GIFs** — Full GIF support including per-frame delays, disposal methods, and frame positioning. Experimental.
-- **Grid detection** — BFS-based. Works on all six block faces (walls, floors, ceilings). Up to 10x10 for images, 4x4 for GIFs (configurable).
-- **Three quality modes** — Fast (ordered/Bayer), Balanced (Floyd-Steinberg), High (Jarvis-Judice-Ninke). All gamma-corrected.
-- **Async processing** — Image downloads, resizing, and dithering run on a dedicated thread pool. The server thread only handles the final map application.
-- **Adaptive performance** — The plugin monitors player count, active map count, and memory pressure, then adjusts animation FPS, render distance, and update intervals automatically.
-- **Distance culling** — Animation packets are only sent to players within render distance. Per-player packet budgets prevent network saturation.
-- **GIF caching** — Processed GIF data is kept in memory (LRU, 30 minute expiry, 100MB cap) so re-applying the same GIF doesn't require reprocessing.
-- **Memory pooling** — Map byte buffers (16KB each) are pooled and reused to reduce GC pressure.
-- **Persistent storage** — All rendered maps survive restarts. Grids are stored as single compressed files rather than one file per map.
-- **Cleanup tools** — Scans item frames and player inventories to find which maps are still in use, then deletes orphaned files.
-- **SSRF protection** — Blocks requests to loopback, link-local, and private addresses. Validates URL schemes, enforces redirect limits, and caps download size at 50MB.
+- **Static images** - PNG, JPG, and any format supported by Java's ImageIO. Rendered with Floyd-Steinberg dithering by default.
+- **Animated GIFs** - Full GIF support including per-frame delays, disposal methods, and frame positioning. Experimental.
+- **Grid detection** - BFS-based. Works on all six block faces (walls, floors, ceilings). Up to 10x10 for images, 4x4 for GIFs (configurable).
+- **Three quality modes** - Fast (ordered/Bayer), Balanced (Floyd-Steinberg), High (Jarvis-Judice-Ninke). All gamma-corrected.
+- **Async processing** - Image downloads, resizing, and dithering run on a dedicated thread pool. The server thread only handles the final map application.
+- **Adaptive performance** - The plugin monitors player count, active map count, and memory pressure, then adjusts animation FPS, render distance, and update intervals automatically.
+- **Distance culling** - Animation packets are only sent to players within render distance. Per-player packet budgets prevent network saturation.
+- **GIF caching** - Processed GIF data is kept in memory (LRU, 30 minute expiry, 100MB cap) so re-applying the same GIF doesn't require reprocessing.
+- **Memory pooling** - Map byte buffers (16KB each) are pooled and reused to reduce GC pressure.
+- **Persistent storage** - All rendered maps survive restarts. Grids are stored as single compressed files rather than one file per map.
+- **Cleanup tools** - Scans item frames and player inventories to find which maps are still in use, then deletes orphaned files.
+- **SSRF protection** - Blocks requests to loopback, link-local, and private addresses. Validates URL schemes, enforces redirect limits, and caps download size at 50MB.
 
 ---
 
