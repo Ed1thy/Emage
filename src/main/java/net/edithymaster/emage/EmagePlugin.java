@@ -50,7 +50,9 @@ public final class EmagePlugin extends JavaPlugin {
         manager.loadAllMaps();
 
         if (getConfig().getBoolean("check-updates", true)) {
-            updateChecker = new UpdateChecker(this, "EdithyLikesToCode", "Emage");
+            Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
+                updateChecker = new UpdateChecker(this, "Ed1thy", "Emage");
+            }, 100L);
         }
 
         getLogger().info("Emage v" + getDescription().getVersion() + " enabled!");

@@ -260,7 +260,7 @@ public final class EmageCore {
         for (int i = 0; i < MAP_SIZE; i++) {
             int rgb = pixels[i];
             if (((rgb >> 24) & 0xFF) < 128) {
-                result[i] = 0;
+                result[i] = 4;
                 continue;
             }
 
@@ -313,7 +313,7 @@ public final class EmageCore {
                 int idx = y * MAP_WIDTH + x;
 
                 if (transparent[idx]) {
-                    result[idx] = 0;
+                    result[idx] = 4;
                     continue;
                 }
 
@@ -394,16 +394,11 @@ public final class EmageCore {
         }
 
         for (int y = 0; y < MAP_WIDTH; y++) {
-            boolean leftToRight = (y % 2 == 0);
-            int startX = leftToRight ? 0 : MAP_WIDTH - 1;
-            int endX = leftToRight ? MAP_WIDTH : -1;
-            int stepX = leftToRight ? 1 : -1;
-
-            for (int x = startX; x != endX; x += stepX) {
+            for (int x = 0; x < MAP_WIDTH; x++) {
                 int idx = y * MAP_WIDTH + x;
 
                 if (transparent[idx]) {
-                    result[idx] = 0;
+                    result[idx] = 4;
                     continue;
                 }
 
@@ -423,20 +418,20 @@ public final class EmageCore {
                 double eG = clampedG - palLin[1];
                 double eB = clampedB - palLin[2];
 
-                distributeError(linR, linG, linB, x + stepX, y, eR, eG, eB, 7.0 / 48.0);
-                distributeError(linR, linG, linB, x + stepX * 2, y, eR, eG, eB, 5.0 / 48.0);
+                distributeError(linR, linG, linB, x + 1, y,     eR, eG, eB, 7.0 / 48.0);
+                distributeError(linR, linG, linB, x + 2, y,     eR, eG, eB, 5.0 / 48.0);
 
-                distributeError(linR, linG, linB, x - stepX * 2, y + 1, eR, eG, eB, 3.0 / 48.0);
-                distributeError(linR, linG, linB, x - stepX, y + 1, eR, eG, eB, 5.0 / 48.0);
-                distributeError(linR, linG, linB, x, y + 1, eR, eG, eB, 7.0 / 48.0);
-                distributeError(linR, linG, linB, x + stepX, y + 1, eR, eG, eB, 5.0 / 48.0);
-                distributeError(linR, linG, linB, x + stepX * 2, y + 1, eR, eG, eB, 3.0 / 48.0);
+                distributeError(linR, linG, linB, x - 2, y + 1, eR, eG, eB, 3.0 / 48.0);
+                distributeError(linR, linG, linB, x - 1, y + 1, eR, eG, eB, 5.0 / 48.0);
+                distributeError(linR, linG, linB, x,     y + 1, eR, eG, eB, 7.0 / 48.0);
+                distributeError(linR, linG, linB, x + 1, y + 1, eR, eG, eB, 5.0 / 48.0);
+                distributeError(linR, linG, linB, x + 2, y + 1, eR, eG, eB, 3.0 / 48.0);
 
-                distributeError(linR, linG, linB, x - stepX * 2, y + 2, eR, eG, eB, 1.0 / 48.0);
-                distributeError(linR, linG, linB, x - stepX, y + 2, eR, eG, eB, 3.0 / 48.0);
-                distributeError(linR, linG, linB, x, y + 2, eR, eG, eB, 5.0 / 48.0);
-                distributeError(linR, linG, linB, x + stepX, y + 2, eR, eG, eB, 3.0 / 48.0);
-                distributeError(linR, linG, linB, x + stepX * 2, y + 2, eR, eG, eB, 1.0 / 48.0);
+                distributeError(linR, linG, linB, x - 2, y + 2, eR, eG, eB, 1.0 / 48.0);
+                distributeError(linR, linG, linB, x - 1, y + 2, eR, eG, eB, 3.0 / 48.0);
+                distributeError(linR, linG, linB, x,     y + 2, eR, eG, eB, 5.0 / 48.0);
+                distributeError(linR, linG, linB, x + 1, y + 2, eR, eG, eB, 3.0 / 48.0);
+                distributeError(linR, linG, linB, x + 2, y + 2, eR, eG, eB, 1.0 / 48.0);
             }
         }
 
@@ -491,25 +486,32 @@ public final class EmageCore {
 
         for (int f = 0; f < frameCount; f++) {
             BufferedImage frame = gifData.frames.get(f);
-            BufferedImage resized = resize(frame, totalW, totalH);
-            resized.getRGB(0, 0, totalW, totalH, allPixels, 0, totalW);
+            int srcW = frame.getWidth();
+            int srcH = frame.getHeight();
 
             final int frameIdx = f;
-            final int[] framePixels = allPixels;
 
             List<Future<?>> tasks = new ArrayList<>(gridW * gridH);
             for (int gy = 0; gy < gridH; gy++) {
                 for (int gx = 0; gx < gridW; gx++) {
                     final int cx = gx, cy = gy;
-                    tasks.add(EXECUTOR.submit(() -> {
-                        int[] chunkPx = new int[MAP_SIZE];
-                        int startX = cx * MAP_WIDTH;
-                        int startY = cy * MAP_WIDTH;
 
-                        for (int row = 0; row < MAP_WIDTH; row++) {
-                            System.arraycopy(framePixels, (startY + row) * totalW + startX,
-                                    chunkPx, row * MAP_WIDTH, MAP_WIDTH);
+                    final int srcX = cx * srcW / gridW;
+                    final int srcY = cy * srcH / gridH;
+                    final int srcChunkW = (cx + 1) * srcW / gridW - srcX;
+                    final int srcChunkH = (cy + 1) * srcH / gridH - srcY;
+
+                    tasks.add(EXECUTOR.submit(() -> {
+                        BufferedImage chunk;
+                        if (srcChunkW > 0 && srcChunkH > 0) {
+                            BufferedImage sub = frame.getSubimage(srcX, srcY, srcChunkW, srcChunkH);
+                            chunk = resize(sub, MAP_WIDTH, MAP_WIDTH);
+                        } else {
+                            chunk = new BufferedImage(MAP_WIDTH, MAP_WIDTH, BufferedImage.TYPE_INT_ARGB);
                         }
+
+                        int[] chunkPx = new int[MAP_SIZE];
+                        chunk.getRGB(0, 0, MAP_WIDTH, MAP_WIDTH, chunkPx, 0, MAP_WIDTH);
 
                         byte[] dithered;
                         if (frameIdx > 0 && prevChunkPixels[cx][cy] != null) {
@@ -563,9 +565,22 @@ public final class EmageCore {
             throw new IOException("Too many redirects");
         }
 
-        java.net.InetAddress address = java.net.InetAddress.getByName(url.getHost());
-        if (address.isLoopbackAddress() || address.isLinkLocalAddress() ||
-                address.isSiteLocalAddress() || address.isAnyLocalAddress()) {
+        java.net.InetAddress address;
+        try {
+            Future<java.net.InetAddress> dnsFuture = EXECUTOR.submit(
+                    () -> java.net.InetAddress.getByName(url.getHost()));
+            address = dnsFuture.get(5, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            throw new IOException("DNS resolution timed out for host: " + url.getHost());
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("DNS resolution interrupted");
+        } catch (ExecutionException e) {
+            Throwable cause = e.getCause();
+            throw new IOException("DNS resolution failed: " + (cause != null ? cause.getMessage() : e.getMessage()));
+        }
+
+        if (address.isLoopbackAddress() || address.isLinkLocalAddress() || address.isSiteLocalAddress() || address.isAnyLocalAddress()) {
             throw new IOException("URLs pointing to internal/local networks are not allowed");
         }
 
@@ -582,9 +597,23 @@ public final class EmageCore {
             conn.disconnect();
             if (redirect != null) {
                 URL redirectUrl = new URL(redirect);
-                java.net.InetAddress redirAddr = java.net.InetAddress.getByName(redirectUrl.getHost());
-                if (redirAddr.isLoopbackAddress() || redirAddr.isLinkLocalAddress() ||
-                        redirAddr.isSiteLocalAddress() || redirAddr.isAnyLocalAddress()) {
+
+                java.net.InetAddress redirAddr;
+                try {
+                    Future<java.net.InetAddress> dnsFuture = EXECUTOR.submit(
+                            () -> java.net.InetAddress.getByName(redirectUrl.getHost()));
+                    redirAddr = dnsFuture.get(5, TimeUnit.SECONDS);
+                } catch (TimeoutException e) {
+                    throw new IOException("DNS resolution timed out for redirect host: " + redirectUrl.getHost());
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    throw new IOException("DNS resolution interrupted on redirect");
+                } catch (ExecutionException e) {
+                    Throwable cause = e.getCause();
+                    throw new IOException("DNS resolution failed on redirect: " + (cause != null ? cause.getMessage() : e.getMessage()));
+                }
+
+                if (redirAddr.isLoopbackAddress() || redirAddr.isLinkLocalAddress() || redirAddr.isSiteLocalAddress() || redirAddr.isAnyLocalAddress()) {
                     throw new IOException("Redirect to internal network blocked");
                 }
                 return openLimitedStream(redirectUrl, remainingRedirects - 1);
@@ -666,6 +695,44 @@ public final class EmageCore {
                 logger.log(Level.FINE, "Could not read GIF logical screen descriptor", e);
             }
 
+            Color gifBackgroundColor = null;
+            try {
+                IIOMetadata streamMeta = reader.getStreamMetadata();
+                if (streamMeta != null) {
+                    IIOMetadataNode root = (IIOMetadataNode) streamMeta.getAsTree(
+                            streamMeta.getNativeMetadataFormatName());
+
+                    NodeList lsdNodes = root.getElementsByTagName("LogicalScreenDescriptor");
+                    int bgColorIndex = 0;
+                    if (lsdNodes.getLength() > 0) {
+                        IIOMetadataNode lsd = (IIOMetadataNode) lsdNodes.item(0);
+                        String bgIdx = lsd.getAttribute("backgroundColorIndex");
+                        if (bgIdx != null && !bgIdx.isEmpty()) {
+                            bgColorIndex = Integer.parseInt(bgIdx);
+                        }
+                    }
+
+                    NodeList gctNodes = root.getElementsByTagName("GlobalColorTable");
+                    if (gctNodes.getLength() > 0) {
+                        IIOMetadataNode gct = (IIOMetadataNode) gctNodes.item(0);
+                        NodeList entries = gct.getElementsByTagName("ColorTableEntry");
+                        for (int ei = 0; ei < entries.getLength(); ei++) {
+                            IIOMetadataNode entry = (IIOMetadataNode) entries.item(ei);
+                            String idxStr = entry.getAttribute("index");
+                            if (idxStr != null && Integer.parseInt(idxStr) == bgColorIndex) {
+                                int red = Integer.parseInt(entry.getAttribute("red"));
+                                int green = Integer.parseInt(entry.getAttribute("green"));
+                                int blue = Integer.parseInt(entry.getAttribute("blue"));
+                                gifBackgroundColor = new Color(red, green, blue, 255);
+                                break;
+                            }
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                logger.log(Level.FINE, "Could not read GIF background color", e);
+            }
+
             BufferedImage firstFrame = reader.read(0);
             if (canvasWidth <= 0 || canvasHeight <= 0) {
                 canvasWidth = firstFrame.getWidth();
@@ -678,6 +745,8 @@ public final class EmageCore {
             canvasG.clearRect(0, 0, canvasWidth, canvasHeight);
 
             BufferedImage restoreCanvas = null;
+
+            final Color finalBgColor = gifBackgroundColor;
 
             for (int i = 0; i < numFrames; i++) {
                 BufferedImage rawFrame;
@@ -736,9 +805,16 @@ public final class EmageCore {
                 delays.add(Math.max(20, delay));
 
                 if ("restoreToBackgroundColor".equalsIgnoreCase(disposal)) {
-                    canvasG.setComposite(AlphaComposite.Clear);
-                    canvasG.fillRect(frameX, frameY, frameW, frameH);
-                    canvasG.setComposite(AlphaComposite.SrcOver);
+                    if (finalBgColor != null) {
+                        canvasG.setComposite(AlphaComposite.Src);
+                        canvasG.setColor(finalBgColor);
+                        canvasG.fillRect(frameX, frameY, frameW, frameH);
+                        canvasG.setComposite(AlphaComposite.SrcOver);
+                    } else {
+                        canvasG.setComposite(AlphaComposite.Clear);
+                        canvasG.fillRect(frameX, frameY, frameW, frameH);
+                        canvasG.setComposite(AlphaComposite.SrcOver);
+                    }
                 } else if ("restoreToPrevious".equalsIgnoreCase(disposal) && restoreCanvas != null) {
                     canvasG.setComposite(AlphaComposite.Src);
                     canvasG.drawImage(restoreCanvas, 0, 0, null);

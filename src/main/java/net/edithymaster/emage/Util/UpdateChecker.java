@@ -22,7 +22,7 @@ public class UpdateChecker implements Listener {
     private final String githubOwner;
     private final String githubRepo;
 
-    private static final String GITHUB_URL = "https://github.com/EdithyLikesToCode/Emage";
+    private static final String GITHUB_URL = "https://github.com/Ed1thy/Emage";
     private static final String MODRINTH_URL = "https://modrinth.com/plugin/emage";
     private static final String SPIGOTMC_URL = "https://www.spigotmc.org/resources/emage.130410/";
 
@@ -34,6 +34,8 @@ public class UpdateChecker implements Listener {
     private static final long CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
     private long lastCheck = 0;
 
+    private volatile boolean checkInProgress = false;
+
     public UpdateChecker(JavaPlugin plugin, String githubOwner, String githubRepo) {
         this.plugin = plugin;
         this.currentVersion = plugin.getDescription().getVersion();
@@ -42,16 +44,24 @@ public class UpdateChecker implements Listener {
 
         Bukkit.getPluginManager().registerEvents(this, plugin);
 
-        checkForUpdates();
-
-        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::checkForUpdates,
-                20 * 60 * 60,
-                20 * 60 * 60 * 6
+        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::periodicCheck,
+                20L,
+                20 * 60 * 60 * 6L
         );
     }
 
+    private void periodicCheck() {
+        if (checkInProgress) return;
+        checkForUpdates();
+    }
+
     public CompletableFuture<Boolean> checkForUpdates() {
+        if (checkInProgress) {
+            return CompletableFuture.completedFuture(updateAvailable);
+        }
+
         return CompletableFuture.supplyAsync(() -> {
+            checkInProgress = true;
             try {
                 long now = System.currentTimeMillis();
                 if (now - lastCheck < CHECK_INTERVAL_MS && latestVersion != null) {
@@ -113,6 +123,8 @@ public class UpdateChecker implements Listener {
             } catch (Exception e) {
                 plugin.getLogger().fine("Update check failed: " + e.getMessage());
                 return false;
+            } finally {
+                checkInProgress = false;
             }
         });
     }

@@ -33,6 +33,9 @@ public final class EmageManager implements Listener {
     private final Map<Long, PendingStaticGrid> pendingStaticGrids = new ConcurrentHashMap<>();
     private final Map<Long, PendingAnimGrid> pendingAnimGrids = new ConcurrentHashMap<>();
 
+    private final Set<Integer> pendingMapInits = ConcurrentHashMap.newKeySet();
+    private volatile boolean mapInitTaskScheduled = false;
+
     private final ExecutorService ioExecutor;
     private final ScheduledExecutorService scheduler;
 
@@ -66,8 +69,17 @@ public final class EmageManager implements Listener {
             grid.saveNow();
         }
 
-        ioExecutor.shutdown();
         scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
+        }
+
+        ioExecutor.shutdown();
         try {
             if (!ioExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
                 ioExecutor.shutdownNow();
@@ -363,15 +375,32 @@ public final class EmageManager implements Listener {
         int mapId = event.getMap().getId();
 
         if (appliedMaps.contains(mapId)) return;
+        if (!mapCache.containsKey(mapId)) return;
 
-        CachedMapData cached = mapCache.get(mapId);
-        if (cached != null) {
-            appliedMaps.add(mapId);
+        pendingMapInits.add(mapId);
+
+        if (!mapInitTaskScheduled) {
+            mapInitTaskScheduled = true;
             Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                if (cached.isAnimation) {
-                    applyAnimRenderer(event.getMap(), cached.frames, cached.delays, cached.syncId);
-                } else if (cached.staticData != null) {
-                    applyStaticRenderer(event.getMap(), cached.staticData);
+                mapInitTaskScheduled = false;
+                Set<Integer> toApply = new HashSet<>(pendingMapInits);
+                pendingMapInits.clear();
+
+                for (int id : toApply) {
+                    if (appliedMaps.contains(id)) continue;
+                    CachedMapData cached = mapCache.get(id);
+                    if (cached == null) continue;
+
+                    @SuppressWarnings("deprecation")
+                    MapView view = Bukkit.getMap(id);
+                    if (view == null) continue;
+
+                    appliedMaps.add(id);
+                    if (cached.isAnimation) {
+                        applyAnimRenderer(view, cached.frames, cached.delays, cached.syncId);
+                    } else if (cached.staticData != null) {
+                        applyStaticRenderer(view, cached.staticData);
+                    }
                 }
             }, 1L);
         }

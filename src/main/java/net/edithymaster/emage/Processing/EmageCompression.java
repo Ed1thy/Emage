@@ -63,7 +63,7 @@ public final class EmageCompression {
                 packed = remapped;
             }
 
-            byte[] compressed = deflate(packed);
+            byte[] compressed = deflate(packed, Deflater.DEFAULT_COMPRESSION);
 
             dos.writeInt(packed.length);
             dos.writeInt(compressed.length);
@@ -288,7 +288,7 @@ public final class EmageCompression {
             }
 
             byte[] rawCellData = cellData.toByteArray();
-            byte[] compressedCellData = deflate(rawCellData);
+            byte[] compressedCellData = deflate(rawCellData, Deflater.DEFAULT_COMPRESSION);
 
             dos.writeInt(rawCellData.length);
             dos.writeInt(compressedCellData.length);
@@ -526,7 +526,7 @@ public final class EmageCompression {
             }
 
             byte[] rawFrameData = frameData.toByteArray();
-            byte[] compressedFrameData = deflate(rawFrameData);
+            byte[] compressedFrameData = deflate(rawFrameData, Deflater.BEST_SPEED);
 
             dos.writeInt(rawFrameData.length);
             dos.writeInt(compressedFrameData.length);
@@ -740,7 +740,7 @@ public final class EmageCompression {
             baos.write('M');
             baos.write('0');
 
-            byte[] compressed = deflate(data);
+            byte[] compressed = deflate(data, Deflater.DEFAULT_COMPRESSION);
             DataOutputStream dos = new DataOutputStream(baos);
             dos.writeInt(data.length);
             dos.writeInt(compressed.length);
@@ -795,8 +795,8 @@ public final class EmageCompression {
         return unpacked;
     }
 
-    private static byte[] deflate(byte[] data) {
-        Deflater deflater = new Deflater(Deflater.BEST_COMPRESSION);
+    private static byte[] deflate(byte[] data, int level) {
+        Deflater deflater = new Deflater(level);
         try {
             deflater.setInput(data);
             deflater.finish();

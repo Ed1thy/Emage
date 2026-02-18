@@ -36,6 +36,9 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
     private final EmageManager manager;
 
     private final Map<UUID, Long> cooldowns = new ConcurrentHashMap<>();
+    private static final long COOLDOWN_PRUNE_INTERVAL_MS = 5 * 60 * 1000L;
+    private volatile long lastCooldownPrune = System.currentTimeMillis();
+
     private static final int WARN_GIF_CELLS = 9;
 
     private static final AtomicInteger activeTasks = new AtomicInteger(0);
@@ -43,6 +46,12 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
     public EmageCommand(EmagePlugin p, EmageManager m) {
         plugin = p;
         manager = m;
+    }
+
+    private void pruneExpiredCooldowns(long now, long cooldownMS) {
+        if (now - lastCooldownPrune < COOLDOWN_PRUNE_INTERVAL_MS) return;
+        lastCooldownPrune = now;
+        cooldowns.entrySet().removeIf(e -> now - e.getValue() >= cooldownMS);
     }
 
     @Override
@@ -55,6 +64,9 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
         if (args.length >= 1 && args[0].startsWith("http")) {
             long now = System.currentTimeMillis();
             long cooldownMs = plugin.getEmageConfig().getCooldownMs();
+
+            pruneExpiredCooldowns(now, cooldownMs);
+
             Long lastUse = cooldowns.get(pl.getUniqueId());
             if (lastUse != null && now - lastUse < cooldownMs) {
                 long remaining = (cooldownMs - (now - lastUse)) / 1000 + 1;
@@ -651,30 +663,44 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
         FrameGrid(ItemFrame startFrame, Integer reqWidth, Integer reqHeight) {
             BlockFace facing = startFrame.getFacing();
 
-            Set<ItemFrame> connected = new HashSet<>();
-            Queue<ItemFrame> queue = new LinkedList<>();
+            int MAX_BFS = 225;
+            int searchRadius = (int) Math.ceil(Math.sqrt(MAX_BFS)) + 2;
+
+            List<ItemFrame> allNearbyFrames = new ArrayList<>();
+            for (Entity e : startFrame.getWorld().getNearbyEntities(
+                    startFrame.getLocation(), searchRadius, searchRadius, searchRadius,
+                    entity -> entity instanceof ItemFrame)) {
+                allNearbyFrames.add((ItemFrame) e);
+            }
+
+            Map<Long, ItemFrame> framesByPos = new HashMap<>();
+            for (ItemFrame f : allNearbyFrames) {
+                if (f.getFacing() == facing) {
+                    framesByPos.put(posKey(f), f);
+                }
+            }
+
             Set<UUID> visited = new HashSet<>();
+            Queue<ItemFrame> queue = new LinkedList<>();
+            Set<ItemFrame> connected = new LinkedHashSet<>();
 
             queue.add(startFrame);
             visited.add(startFrame.getUniqueId());
             connected.add(startFrame);
-            int MAX_BFS = 225;
 
             while (!queue.isEmpty() && connected.size() < MAX_BFS) {
                 ItemFrame current = queue.poll();
 
                 for (BlockFace dir : getSearchDirections(facing)) {
-                    var neighborLoc = current.getLocation().add(dir.getDirection());
+                    int nx = current.getLocation().getBlockX() + dir.getModX();
+                    int ny = current.getLocation().getBlockY() + dir.getModY();
+                    int nz = current.getLocation().getBlockZ() + dir.getModZ();
 
-                    for (Entity entity : current.getWorld().getNearbyEntities(neighborLoc, 0.5, 0.5, 0.5)) {
-                        if (entity instanceof ItemFrame neighbor &&
-                                !visited.contains(neighbor.getUniqueId()) &&
-                                neighbor.getFacing() == facing) {
-
-                            visited.add(neighbor.getUniqueId());
-                            connected.add(neighbor);
-                            queue.add(neighbor);
-                        }
+                    ItemFrame neighbor = framesByPos.get(packPos(nx, ny, nz));
+                    if (neighbor != null && !visited.contains(neighbor.getUniqueId())) {
+                        visited.add(neighbor.getUniqueId());
+                        connected.add(neighbor);
+                        queue.add(neighbor);
                     }
                 }
             }
@@ -749,6 +775,18 @@ public final class EmageCommand implements CommandExecutor, TabCompleter {
                 this.width = calcWidth(facing, minX, maxX, minZ, maxZ);
                 this.height = calcHeight(facing, minY, maxY, minZ, maxZ);
             }
+        }
+
+        private static long posKey(ItemFrame f) {
+            return packPos(
+                    f.getLocation().getBlockX(),
+                    f.getLocation().getBlockY(),
+                    f.getLocation().getBlockZ()
+            );
+        }
+
+        private static long packPos(int x, int y, int z) {
+            return ((long) (x & 0x3FFFFFF) << 38) | ((long) (y & 0xFFF) << 26) | (z & 0x3FFFFFF);
         }
 
         private static BlockFace[] getSearchDirections(BlockFace facing) {

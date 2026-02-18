@@ -29,8 +29,6 @@ public final class GifRenderer extends MapRenderer {
 
     private static final int DEFAULT_RENDER_DISTANCE_SQ = 64 * 64;
 
-    private static final List<GifRenderer> DIRTY_BUFFER = new ArrayList<>();
-
     private final int id;
     private final long syncId;
     private final byte[][] frames;
@@ -149,6 +147,7 @@ public final class GifRenderer extends MapRenderer {
 
     private static void tick() {
         if (!running || SYNC_GROUPS.isEmpty()) return;
+        if (Bukkit.getOnlinePlayers().isEmpty()) return;
 
         long now = System.currentTimeMillis();
 
@@ -168,14 +167,14 @@ public final class GifRenderer extends MapRenderer {
         Collection<? extends Player> players = Bukkit.getOnlinePlayers();
         if (players.isEmpty()) return;
 
-        DIRTY_BUFFER.clear();
+        List<GifRenderer> dirtyRenderers = new ArrayList<>();
         for (GifRenderer renderer : RENDERERS.values()) {
             if (renderer.needsRender && renderer.mapView != null) {
-                DIRTY_BUFFER.add(renderer);
+                dirtyRenderers.add(renderer);
             }
         }
 
-        if (DIRTY_BUFFER.isEmpty()) return;
+        if (dirtyRenderers.isEmpty()) return;
 
         int renderDistSq = config != null ? config.getRenderDistanceSquared() : DEFAULT_RENDER_DISTANCE_SQ;
         int perPlayerBudget = config != null ? config.getMaxPacketsPerTick() : 80;
@@ -187,10 +186,10 @@ public final class GifRenderer extends MapRenderer {
             World playerWorld = player.getWorld();
             int sent = 0;
 
-            for (int i = 0, size = DIRTY_BUFFER.size(); i < size; i++) {
+            for (int i = 0, size = dirtyRenderers.size(); i < size; i++) {
                 if (sent >= perPlayerBudget) break;
 
-                GifRenderer renderer = DIRTY_BUFFER.get(i);
+                GifRenderer renderer = dirtyRenderers.get(i);
 
                 @SuppressWarnings("deprecation")
                 int mapID = renderer.mapView.getId();
@@ -208,8 +207,8 @@ public final class GifRenderer extends MapRenderer {
             }
         }
 
-        for (int i = 0, size = DIRTY_BUFFER.size(); i < size; i++) {
-            DIRTY_BUFFER.get(i).needsRender = false;
+        for (int i = 0, size = dirtyRenderers.size(); i < size; i++) {
+            dirtyRenderers.get(i).needsRender = false;
         }
     }
 
@@ -281,10 +280,7 @@ public final class GifRenderer extends MapRenderer {
     @Override
     public void render(MapView map, MapCanvas canvas, Player player) {
         if (this.mapView == null) {
-            this.mapView = map;
-            @SuppressWarnings("deprecation")
-            int mapID = map.getId();
-            RENDERERS.put(mapID, this);
+            setMapView(map);
         }
 
         SyncGroup group = SYNC_GROUPS.get(syncId);

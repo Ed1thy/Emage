@@ -77,7 +77,7 @@ public final class EmageColors {
 
     private static final Color[] COLORS = new Color[256];
 
-    private static final int CACHE_BITS = 8;
+    private static final int CACHE_BITS = 7;
     private static final int CACHE_SIZE = 1 << (CACHE_BITS * 3);
     private static final int CACHE_SHIFT = 8 - CACHE_BITS;
     private static final byte[] CACHE = new byte[CACHE_SIZE];
@@ -184,7 +184,7 @@ public final class EmageColors {
             if (d < bestLabEuc) bestLabEuc = d;
         }
 
-        double threshold = bestLabEuc * 6.0 + 200.0;
+        double threshold = bestLabEuc * 3.0 + 100.0;
 
         int bestIndex = 4;
         double bestDistance = Double.MAX_VALUE;
