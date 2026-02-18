@@ -58,7 +58,7 @@ A Minecraft plugin for displaying images and animated GIFs on item frames. Suppo
 
 ## Installation
 
-1. Download from [Modrinth](https://modrinth.com/plugin/emage), [SpigotMC](https://www.spigotmc.org/resources/emage.130410/), or [GitHub Releases](https://github.com/EdithyLikesToCode/Emage/releases).
+1. Download from [Modrinth](https://modrinth.com/plugin/emage), [SpigotMC](https://www.spigotmc.org/resources/emage.130410/), or [GitHub Releases](https://github.com/Ed1thy/Emage/releases).
 2. Drop `Emage.jar` into your `plugins` folder.
 3. Restart the server. The first startup takes a moment while the color lookup cache is built.
 4. Config is at `plugins/Emage/config.yml` if you want to adjust limits or performance settings.
@@ -77,20 +77,8 @@ Place item frames on a wall (or floor/ceiling) in a grid, look at one of them, a
 
 If you don't specify a size, the plugin uses whatever grid it detects. If you do specify a size, it anchors from the frame you're looking at.
 
----
-
-## Reporting Issues
-
-If you find a bug, open an issue on [GitHub](https://github.com/EdithyLikesToCode/Emage/issues/new/choose) with:
-
-- Server software and version (e.g. Paper 1.20.6)
-- Emage version (`/emage update` shows it)
-- Steps to reproduce
-- Relevant logs from `logs/latest.log`
-- Screenshots if it's a visual problem
-
 ## Links
 
-- [GitHub](https://github.com/EdithyLikesToCode/Emage)
+- [GitHub](https://github.com/Ed1thy/Emage)
 - [Modrinth](https://modrinth.com/plugin/emage)
 - [SpigotMC](https://www.spigotmc.org/resources/emage.130410/)
