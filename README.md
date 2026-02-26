@@ -57,18 +57,20 @@ Breaking an item frame that has an Emage map on it will clean up the associated 
 
 ## Commands
 
-| Command | Description | Permission |
-|--|--|--|
+| Command              | Description | Permission |
+|----------------------|--|--|
 | `/emage <url> [WxH]` | Apply an image or GIF to the targeted item frame grid | `emage.use` |
-| `/emage help` | Show command help | `emage.use` |
-| `/emage reload` | Reload the config | `emage.admin` |
-| `/emage stats` | Show storage statistics | `emage.admin` |
-| `/emage perf` | Show performance info (FPS, render distance, cache) | `emage.admin` |
-| `/emage cache` | Show GIF cache statistics | `emage.admin` |
-| `/emage clearcache` | Clear the GIF processing cache | `emage.admin` |
-| `/emage cleanup` | Scan for and delete unused map data | `emage.admin` |
-| `/emage update` | Check for a new version | `emage.admin` |
-| `/emage synccolors` | Re-sync the map color palette with the server and rebuild the cache | `emage.admin` |
+| `/emage help`        | Show command help | `emage.use` |
+| `/emage remove`      | Remove image from grid | `emage.use` |
+| `/emage remove all`  | Remove all images globally | `emage.admin` |
+| `/emage reload`      | Reload the config | `emage.admin` |
+| `/emage stats`       | Show storage statistics | `emage.admin` |
+| `/emage perf`        | Show performance info (FPS, render distance, cache) | `emage.admin` |
+| `/emage cache`       | Show GIF cache statistics | `emage.admin` |
+| `/emage clearcache`  | Clear the GIF processing cache | `emage.admin` |
+| `/emage cleanup`     | Scan for and delete unused map data | `emage.admin` |
+| `/emage update`      | Check for a new version | `emage.admin` |
+| `/emage synccolors`  | Re-sync the map color palette with the server and rebuild the cache | `emage.admin` |
 
 ## Permissions
 
