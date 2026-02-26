@@ -1,11 +1,10 @@
 package net.edithymaster.emage.Processing;
 
+import com.github.luben.zstd.Zstd;
+
 import java.io.*;
 import java.util.*;
-import java.util.logging.Level;
 import java.util.logging.Logger;
-import java.util.zip.Deflater;
-import java.util.zip.Inflater;
 
 public final class EmageCompression {
 
@@ -13,907 +12,183 @@ public final class EmageCompression {
 
     private static final Logger logger = Logger.getLogger(EmageCompression.class.getName());
 
-    private static final int MAP_SIZE = 16384;
+    private static final byte[] MAGIC_HEADER = { 'E', 'M', 'Z' };
 
     public static byte[] compressSingleStatic(byte[] data) {
         try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(baos);
+            ByteArrayOutputStream logicStream = new ByteArrayOutputStream();
+            DataOutputStream dos = new DataOutputStream(logicStream);
 
-            dos.writeByte('E');
-            dos.writeByte('M');
-            dos.writeByte('1');
+            dos.write(MAGIC_HEADER);
+            dos.writeByte(1);
 
-            int[] colorCount = new int[256];
-            for (byte b : data) {
-                colorCount[b & 0xFF]++;
-            }
+            byte[] compressed = Zstd.compress(data, 1);
 
-            int uniqueColors = 0;
-            byte[] colorToIndex = new byte[256];
-            byte[] indexToColor = new byte[256];
-
-            for (int i = 0; i < 256; i++) {
-                if (colorCount[i] > 0) {
-                    colorToIndex[i] = (byte) uniqueColors;
-                    indexToColor[uniqueColors] = (byte) i;
-                    uniqueColors++;
-                }
-            }
-
-            if (uniqueColors == 0) uniqueColors = 1;
-
-            dos.writeByte(uniqueColors & 0xFF);
-            for (int i = 0; i < uniqueColors; i++) {
-                dos.writeByte(indexToColor[i]);
-            }
-
-            int bpp = getBitsPerPixel(uniqueColors);
-            dos.writeByte(bpp);
-
-            byte[] remapped = new byte[data.length];
-            for (int i = 0; i < data.length; i++) {
-                remapped[i] = colorToIndex[data[i] & 0xFF];
-            }
-
-            byte[] packed;
-            if (bpp < 8) {
-                packed = packBits(remapped, bpp);
-            } else {
-                packed = remapped;
-            }
-
-            byte[] compressed = deflate(packed, Deflater.DEFAULT_COMPRESSION);
-
-            dos.writeInt(packed.length);
-            dos.writeInt(compressed.length);
-            dos.write(compressed);
-
-            dos.close();
-
-            return baos.toByteArray();
-
-        } catch (IOException e) {
-            logger.log(Level.WARNING, "Failed to compress static map data", e);
-            return deflateFallback(data);
-        }
-    }
-
-    public static byte[] decompressSingleStatic(byte[] compressed) {
-        try {
-            ByteArrayInputStream bais = new ByteArrayInputStream(compressed);
-            DataInputStream dis = new DataInputStream(bais);
-
-            int m1 = dis.readByte() & 0xFF;
-            int m2 = dis.readByte() & 0xFF;
-            int version = dis.readByte() & 0xFF;
-
-            if (m1 != 'E' || m2 != 'M') {
-                dis.close();
-                return decompressLegacy(compressed);
-            }
-
-            int uniqueColors = dis.readByte() & 0xFF;
-            if (uniqueColors == 0) uniqueColors = 256;
-
-            byte[] indexToColor = new byte[256];
-            for (int i = 0; i < uniqueColors; i++) {
-                indexToColor[i] = dis.readByte();
-            }
-
-            int bpp = dis.readByte() & 0xFF;
-            int packedSize = dis.readInt();
-            int compressedSize = dis.readInt();
-
-            byte[] compressedData = new byte[compressedSize];
-            dis.readFully(compressedData);
-            dis.close();
-
-            byte[] packed = inflate(compressedData, packedSize);
-
-            byte[] remapped;
-            if (bpp < 8) {
-                remapped = unpackBits(packed, bpp, MAP_SIZE);
-            } else {
-                remapped = packed;
-            }
-
-            byte[] result = new byte[MAP_SIZE];
-            for (int i = 0; i < MAP_SIZE; i++) {
-                int idx = remapped[i] & 0xFF;
-                result[i] = indexToColor[idx];
-            }
-
-            return result;
-
-        } catch (IOException e) {
-            logger.log(Level.WARNING, "Failed to decompress static map data", e);
-            return decompressLegacy(compressed);
-        }
-    }
-
-    public static Set<Integer> getMapIdsFromFile(File file) {
-        Set<Integer> mapIds = new HashSet<>();
-
-        try (DataInputStream dis = new DataInputStream(new FileInputStream(file))) {
-            byte[] header = new byte[3];
-            dis.readFully(header);
-
-            if (header[0] == 'E' && header[1] == 'G' && (header[2] == 'S' || header[2] == 'A')) {
-                dis.readLong();
-                int cellCount = dis.readShort() & 0xFFFF;
-
-                if (header[2] == 'A') {
-                    dis.readShort();
-                }
-
-                for (int i = 0; i < cellCount; i++) {
-                    mapIds.add(dis.readInt());
-                }
-                return mapIds;
-            }
-
-            if (header[0] == 'E' && header[1] == 'G') {
-                dis.readLong();
-                int cellCount = dis.readInt();
-                int frameCount = dis.readInt();
-
-                dis.skipBytes(frameCount * 2);
-
-                for (int i = 0; i < cellCount; i++) {
-                    mapIds.add(dis.readInt());
-                }
-                return mapIds;
-            }
-
-        } catch (IOException e) {
-            logger.log(Level.FINE, "Could not read map IDs from file " + file.getName(), e);
-        }
-
-        return mapIds;
-    }
-
-    public static byte[] compressStaticGrid(Map<Integer, byte[]> cells, long gridId) {
-        try {
-            if (cells.isEmpty()) {
-                return new byte[0];
-            }
-
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(baos);
-
-            dos.writeByte('E');
-            dos.writeByte('G');
-            dos.writeByte('S');
-
-            dos.writeLong(gridId);
-
-            List<Integer> mapIds = new ArrayList<>(cells.keySet());
-            Collections.sort(mapIds);
-
-            dos.writeShort(mapIds.size());
-
-            for (int mapId : mapIds) {
-                dos.writeInt(mapId);
-            }
-
-            int[] colorCount = new int[256];
-            for (byte[] data : cells.values()) {
-                for (byte b : data) {
-                    colorCount[b & 0xFF]++;
-                }
-            }
-
-            int uniqueColors = 0;
-            byte[] colorToIndex = new byte[256];
-            byte[] indexToColor = new byte[256];
-
-            for (int i = 0; i < 256; i++) {
-                if (colorCount[i] > 0) {
-                    colorToIndex[i] = (byte) uniqueColors;
-                    indexToColor[uniqueColors] = (byte) i;
-                    uniqueColors++;
-                }
-            }
-
-            if (uniqueColors == 0) uniqueColors = 1;
-
-            dos.writeByte(uniqueColors & 0xFF);
-            for (int i = 0; i < uniqueColors; i++) {
-                dos.writeByte(indexToColor[i]);
-            }
-
-            int bpp = getBitsPerPixel(uniqueColors);
-            dos.writeByte(bpp);
-
-            ByteArrayOutputStream cellData = new ByteArrayOutputStream();
-            byte[] prevRemapped = null;
-
-            for (int mapId : mapIds) {
-                byte[] data = cells.get(mapId);
-
-                byte[] remapped = new byte[MAP_SIZE];
-                for (int i = 0; i < MAP_SIZE; i++) {
-                    remapped[i] = colorToIndex[data[i] & 0xFF];
-                }
-
-                if (prevRemapped == null) {
-                    byte[] packed = packBits(remapped, bpp);
-                    cellData.write(0);
-                    writeShort(cellData, packed.length);
-                    cellData.write(packed);
-                } else {
-                    int diffCount = 0;
-                    for (int i = 0; i < MAP_SIZE; i++) {
-                        if (remapped[i] != prevRemapped[i]) diffCount++;
-                    }
-
-                    if (diffCount == 0) {
-                        cellData.write(3);
-                    } else if (diffCount < MAP_SIZE / 8) {
-                        ByteArrayOutputStream sparse = new ByteArrayOutputStream();
-                        writeShort(sparse, diffCount);
-                        for (int i = 0; i < MAP_SIZE; i++) {
-                            if (remapped[i] != prevRemapped[i]) {
-                                writeShort(sparse, i);
-                                sparse.write(remapped[i] & 0xFF);
-                            }
-                        }
-                        byte[] sparseData = sparse.toByteArray();
-                        cellData.write(1);
-                        writeShort(cellData, sparseData.length);
-                        cellData.write(sparseData);
-                    } else {
-                        byte[] xorData = new byte[MAP_SIZE];
-                        for (int i = 0; i < MAP_SIZE; i++) {
-                            xorData[i] = (byte) (remapped[i] ^ prevRemapped[i]);
-                        }
-                        byte[] packed = packBits(xorData, bpp);
-
-                        byte[] fullPacked = packBits(remapped, bpp);
-
-                        if (packed.length < fullPacked.length) {
-                            cellData.write(2);
-                            writeShort(cellData, packed.length);
-                            cellData.write(packed);
-                        } else {
-                            cellData.write(0);
-                            writeShort(cellData, fullPacked.length);
-                            cellData.write(fullPacked);
-                        }
-                    }
-                }
-
-                prevRemapped = remapped;
-            }
-
-            byte[] rawCellData = cellData.toByteArray();
-            byte[] compressedCellData = deflate(rawCellData, Deflater.DEFAULT_COMPRESSION);
-
-            dos.writeInt(rawCellData.length);
-            dos.writeInt(compressedCellData.length);
-            dos.write(compressedCellData);
-
-            dos.close();
-
-            byte[] result = baos.toByteArray();
-            int rawSize = cells.size() * MAP_SIZE;
-
-            logger.fine("Static grid compression: " + rawSize + " -> " + result.length +
-                    " bytes (" + String.format("%.1f%%", result.length * 100.0 / rawSize) +
-                    "), cells: " + cells.size() + ", colors: " + uniqueColors + ", bpp: " + bpp);
-
-            return result;
-
-        } catch (IOException e) {
-            logger.log(Level.WARNING, "Failed to compress static grid", e);
-            return new byte[0];
-        }
-    }
-
-    public static StaticGridData decompressStaticGrid(byte[] data) {
-        try {
-            ByteArrayInputStream bais = new ByteArrayInputStream(data);
-            DataInputStream dis = new DataInputStream(bais);
-
-            int m1 = dis.readByte() & 0xFF;
-            int m2 = dis.readByte() & 0xFF;
-            int m3 = dis.readByte() & 0xFF;
-
-            if (m1 != 'E' || m2 != 'G' || m3 != 'S') {
-                dis.close();
-                return null;
-            }
-
-            long gridId = dis.readLong();
-            int cellCount = dis.readShort() & 0xFFFF;
-
-            List<Integer> mapIds = new ArrayList<>(cellCount);
-            for (int i = 0; i < cellCount; i++) {
-                mapIds.add(dis.readInt());
-            }
-
-            int uniqueColors = dis.readByte() & 0xFF;
-            if (uniqueColors == 0) uniqueColors = 256;
-
-            byte[] indexToColor = new byte[256];
-            for (int i = 0; i < uniqueColors; i++) {
-                indexToColor[i] = dis.readByte();
-            }
-
-            int bpp = dis.readByte() & 0xFF;
-
-            int rawSize = dis.readInt();
-            int compressedSize = dis.readInt();
-
-            byte[] compressedCellData = new byte[compressedSize];
-            dis.readFully(compressedCellData);
-            dis.close();
-
-            byte[] rawCellData = inflate(compressedCellData, rawSize);
-
-            Map<Integer, byte[]> cells = new HashMap<>();
-            ByteArrayInputStream cellIn = new ByteArrayInputStream(rawCellData);
-            byte[] prevRemapped = null;
-
-            for (int mapId : mapIds) {
-                int marker = cellIn.read() & 0xFF;
-                byte[] remapped;
-
-                if (marker == 3) {
-                    remapped = prevRemapped != null ? prevRemapped.clone() : new byte[MAP_SIZE];
-                } else {
-                    int dataLen = readShort(cellIn);
-                    byte[] frameData = readExact(cellIn, dataLen);
-
-                    if (marker == 0) {
-                        remapped = unpackBits(frameData, bpp, MAP_SIZE);
-                    } else if (marker == 1) {
-                        remapped = prevRemapped != null ? prevRemapped.clone() : new byte[MAP_SIZE];
-                        ByteArrayInputStream sparseIn = new ByteArrayInputStream(frameData);
-                        int count = readShort(sparseIn);
-                        for (int i = 0; i < count; i++) {
-                            int pos = readShort(sparseIn);
-                            int val = sparseIn.read() & 0xFF;
-                            if (pos < MAP_SIZE) remapped[pos] = (byte) val;
-                        }
-                    } else {
-                        byte[] xorData = unpackBits(frameData, bpp, MAP_SIZE);
-                        byte[] prev = prevRemapped != null ? prevRemapped : new byte[MAP_SIZE];
-                        remapped = new byte[MAP_SIZE];
-                        for (int i = 0; i < MAP_SIZE; i++) {
-                            remapped[i] = (byte) (xorData[i] ^ prev[i]);
-                        }
-                    }
-                }
-
-                byte[] result = new byte[MAP_SIZE];
-                for (int i = 0; i < MAP_SIZE; i++) {
-                    result[i] = indexToColor[remapped[i] & 0xFF];
-                }
-
-                cells.put(mapId, result);
-                prevRemapped = remapped;
-            }
-
-            return new StaticGridData(gridId, cells);
-
-        } catch (IOException e) {
-            logger.log(Level.WARNING, "Failed to decompress static grid", e);
-            return null;
-        }
-    }
-
-    public static byte[] compressAnimGrid(Map<Integer, List<byte[]>> cells, List<Integer> delays, long syncId) {
-        try {
-            if (cells.isEmpty()) {
-                return new byte[0];
-            }
-
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            DataOutputStream dos = new DataOutputStream(baos);
-
-            dos.writeByte('E');
-            dos.writeByte('G');
-            dos.writeByte('A');
-
-            dos.writeLong(syncId);
-
-            List<Integer> mapIds = new ArrayList<>(cells.keySet());
-            Collections.sort(mapIds);
-
-            int frameCount = cells.get(mapIds.get(0)).size();
-
-            dos.writeShort(mapIds.size());
-            dos.writeShort(frameCount);
-
-            for (int mapId : mapIds) {
-                dos.writeInt(mapId);
-            }
-
-            int avgDelay = 100;
-            if (delays != null && !delays.isEmpty()) {
-                avgDelay = (int) delays.stream().mapToInt(Integer::intValue).average().orElse(100);
-            }
-            dos.writeShort(avgDelay);
-
-            for (int i = 0; i < frameCount; i++) {
-                int delay = (delays != null && i < delays.size()) ? delays.get(i) : avgDelay;
-                int diff = delay - avgDelay;
-                dos.writeShort(diff);
-            }
-
-            int[] colorCount = new int[256];
-            for (List<byte[]> frames : cells.values()) {
-                for (byte[] frame : frames) {
-                    for (byte b : frame) {
-                        colorCount[b & 0xFF]++;
-                    }
-                }
-            }
-
-            int uniqueColors = 0;
-            byte[] colorToIndex = new byte[256];
-            byte[] indexToColor = new byte[256];
-
-            for (int i = 0; i < 256; i++) {
-                if (colorCount[i] > 0) {
-                    colorToIndex[i] = (byte) uniqueColors;
-                    indexToColor[uniqueColors] = (byte) i;
-                    uniqueColors++;
-                }
-            }
-
-            if (uniqueColors == 0) uniqueColors = 1;
-
-            dos.writeByte(uniqueColors & 0xFF);
-            for (int i = 0; i < uniqueColors; i++) {
-                dos.writeByte(indexToColor[i]);
-            }
-
-            int bpp = getBitsPerPixel(uniqueColors);
-            dos.writeByte(bpp);
-
-            ByteArrayOutputStream frameData = new ByteArrayOutputStream();
-
-            Map<Integer, byte[]> prevTemporal = new HashMap<>();
-
-            for (int f = 0; f < frameCount; f++) {
-                byte[] prevSpatial = null;
-
-                for (int mapId : mapIds) {
-                    byte[] frame = cells.get(mapId).get(f);
-
-                    byte[] remapped = new byte[MAP_SIZE];
-                    for (int i = 0; i < MAP_SIZE; i++) {
-                        remapped[i] = colorToIndex[frame[i] & 0xFF];
-                    }
-
-                    byte[] temporalRef = prevTemporal.get(mapId);
-
-                    byte[] bestData;
-                    int bestMarker;
-
-                    byte[] fullPacked = packBits(remapped, bpp);
-                    bestData = fullPacked;
-                    bestMarker = 0;
-
-                    if (temporalRef != null) {
-                        EncodingResult temporal = tryDelta(remapped, temporalRef, bpp);
-                        if (temporal.size < bestData.length) {
-                            bestData = temporal.data;
-                            bestMarker = temporal.marker | 0x10;
-                        }
-                    }
-
-                    if (prevSpatial != null) {
-                        EncodingResult spatial = tryDelta(remapped, prevSpatial, bpp);
-                        if (spatial.size < bestData.length) {
-                            bestData = spatial.data;
-                            bestMarker = spatial.marker | 0x20;
-                        }
-                    }
-
-                    frameData.write(bestMarker);
-                    if ((bestMarker & 0x0F) != 3) {
-                        writeShort(frameData, bestData.length);
-                        frameData.write(bestData);
-                    }
-
-                    prevTemporal.put(mapId, remapped);
-                    prevSpatial = remapped;
-                }
-            }
-
-            byte[] rawFrameData = frameData.toByteArray();
-            byte[] compressedFrameData = deflate(rawFrameData, Deflater.BEST_SPEED);
-
-            dos.writeInt(rawFrameData.length);
-            dos.writeInt(compressedFrameData.length);
-            dos.write(compressedFrameData);
-
-            dos.close();
-
-            return baos.toByteArray();
-
-        } catch (IOException e) {
-            logger.log(Level.WARNING, "Failed to compress animation grid", e);
-            return new byte[0];
-        }
-    }
-
-    private static class EncodingResult {
-        final byte[] data;
-        final int marker;
-        final int size;
-
-        EncodingResult(byte[] data, int marker) {
-            this.data = data;
-            this.marker = marker;
-            this.size = (marker == 3) ? 1 : data.length + 3;
-        }
-    }
-
-    private static EncodingResult tryDelta(byte[] current, byte[] reference, int bpp) {
-        int diffCount = 0;
-        for (int i = 0; i < MAP_SIZE; i++) {
-            if (current[i] != reference[i]) diffCount++;
-        }
-
-        if (diffCount == 0) {
-            return new EncodingResult(new byte[0], 3);
-        }
-
-        if (diffCount < MAP_SIZE / 8) {
-            try {
-                ByteArrayOutputStream sparse = new ByteArrayOutputStream();
-                writeShort(sparse, diffCount);
-                for (int i = 0; i < MAP_SIZE; i++) {
-                    if (current[i] != reference[i]) {
-                        writeShort(sparse, i);
-                        sparse.write(current[i] & 0xFF);
-                    }
-                }
-                return new EncodingResult(sparse.toByteArray(), 1);
-            } catch (IOException e) {
-                logger.log(Level.FINE, "Sparse encoding failed, falling back to XOR", e);
-            }
-        }
-
-        byte[] xorData = new byte[MAP_SIZE];
-        for (int i = 0; i < MAP_SIZE; i++) {
-            xorData[i] = (byte) (current[i] ^ reference[i]);
-        }
-        byte[] packed = packBits(xorData, bpp);
-        return new EncodingResult(packed, 2);
-    }
-
-    public static AnimGridData decompressAnimGrid(byte[] data) {
-        try {
-            ByteArrayInputStream bais = new ByteArrayInputStream(data);
-            DataInputStream dis = new DataInputStream(bais);
-
-            int m1 = dis.readByte() & 0xFF;
-            int m2 = dis.readByte() & 0xFF;
-            int m3 = dis.readByte() & 0xFF;
-
-            if (m1 != 'E' || m2 != 'G' || m3 != 'A') {
-                dis.close();
-                return decompressLegacyAnimGrid(data);
-            }
-
-            long syncId = dis.readLong();
-            int cellCount = dis.readShort() & 0xFFFF;
-            int frameCount = dis.readShort() & 0xFFFF;
-
-            List<Integer> mapIds = new ArrayList<>(cellCount);
-            for (int i = 0; i < cellCount; i++) {
-                mapIds.add(dis.readInt());
-            }
-
-            int avgDelay = dis.readShort() & 0xFFFF;
-            List<Integer> delays = new ArrayList<>(frameCount);
-            for (int i = 0; i < frameCount; i++) {
-                int diff = dis.readShort();
-                delays.add(Math.max(20, avgDelay + diff));
-            }
-
-            int uniqueColors = dis.readByte() & 0xFF;
-            if (uniqueColors == 0) uniqueColors = 256;
-
-            byte[] indexToColor = new byte[256];
-            for (int i = 0; i < uniqueColors; i++) {
-                indexToColor[i] = dis.readByte();
-            }
-
-            int bpp = dis.readByte() & 0xFF;
-
-            int rawSize = dis.readInt();
-            int compressedSize = dis.readInt();
-
-            byte[] compressedFrameData = new byte[compressedSize];
-            dis.readFully(compressedFrameData);
-            dis.close();
-
-            byte[] rawFrameData = inflate(compressedFrameData, rawSize);
-
-            Map<Integer, List<byte[]>> cells = new HashMap<>();
-            for (int mapId : mapIds) {
-                cells.put(mapId, new ArrayList<>(frameCount));
-            }
-
-            ByteArrayInputStream frameIn = new ByteArrayInputStream(rawFrameData);
-            Map<Integer, byte[]> prevTemporal = new HashMap<>();
-
-            for (int f = 0; f < frameCount; f++) {
-                byte[] prevSpatial = null;
-
-                for (int mapId : mapIds) {
-                    int header = frameIn.read() & 0xFF;
-                    int refType = (header >> 4) & 0x0F;
-                    int marker = header & 0x0F;
-
-                    byte[] reference;
-                    if (refType == 1) {
-                        reference = prevTemporal.get(mapId);
-                    } else if (refType == 2) {
-                        reference = prevSpatial;
-                    } else {
-                        reference = null;
-                    }
-
-                    byte[] remapped;
-
-                    if (marker == 3) {
-                        remapped = reference != null ? reference.clone() : new byte[MAP_SIZE];
-                    } else {
-                        int dataLen = readShort(frameIn);
-                        byte[] frameData = readExact(frameIn, dataLen);
-
-                        if (marker == 0) {
-                            remapped = unpackBits(frameData, bpp, MAP_SIZE);
-                        } else if (marker == 1) {
-                            remapped = reference != null ? reference.clone() : new byte[MAP_SIZE];
-                            ByteArrayInputStream sparseIn = new ByteArrayInputStream(frameData);
-                            int count = readShort(sparseIn);
-                            for (int i = 0; i < count; i++) {
-                                int pos = readShort(sparseIn);
-                                int val = sparseIn.read() & 0xFF;
-                                if (pos < MAP_SIZE) remapped[pos] = (byte) val;
-                            }
-                        } else {
-                            byte[] xorData = unpackBits(frameData, bpp, MAP_SIZE);
-                            byte[] ref = reference != null ? reference : new byte[MAP_SIZE];
-                            remapped = new byte[MAP_SIZE];
-                            for (int i = 0; i < MAP_SIZE; i++) {
-                                remapped[i] = (byte) (xorData[i] ^ ref[i]);
-                            }
-                        }
-                    }
-
-                    byte[] result = new byte[MAP_SIZE];
-                    for (int i = 0; i < MAP_SIZE; i++) {
-                        result[i] = indexToColor[remapped[i] & 0xFF];
-                    }
-
-                    cells.get(mapId).add(result);
-                    prevTemporal.put(mapId, remapped);
-                    prevSpatial = remapped;
-                }
-            }
-
-            return new AnimGridData(syncId, cells, delays);
-
-        } catch (IOException e) {
-            logger.log(Level.WARNING, "Failed to decompress animation grid", e);
-            return null;
-        }
-    }
-
-    private static AnimGridData decompressLegacyAnimGrid(byte[] data) {
-        try {
-            if (data.length < 3) return null;
-
-            ByteArrayInputStream bais = new ByteArrayInputStream(data);
-            DataInputStream dis = new DataInputStream(bais);
-
-            int m1 = dis.readByte() & 0xFF;
-            int m2 = dis.readByte() & 0xFF;
-            int version = dis.readByte() & 0xFF;
-
-            if (m1 == 'E' && m2 == 'M') {
-                byte[] mapData;
-
-                if (version == '0') {
-                    int originalSize = dis.readInt();
-                    int compressedSize = dis.readInt();
-                    byte[] compressed = new byte[compressedSize];
-                    dis.readFully(compressed);
-                    mapData = inflate(compressed, originalSize);
-                } else if (version == '1') {
-                    dis.close();
-                    mapData = decompressSingleStatic(data);
-                } else {
-                    dis.close();
-                    return null;
-                }
-
-                dis.close();
-
-                if (mapData != null && mapData.length == MAP_SIZE) {
-                    List<byte[]> frames = new ArrayList<>();
-                    frames.add(mapData);
-                    List<Integer> delays = new ArrayList<>();
-                    delays.add(100);
-                    Map<Integer, List<byte[]>> cells = new HashMap<>();
-                    cells.put(0, frames);
-                    return new AnimGridData(0L, cells, delays);
-                }
-            }
-
-            dis.close();
-        } catch (Exception e) {
-            logger.log(Level.FINE, "Legacy animation decompression failed", e);
-        }
-
-        return null;
-    }
-
-    private static byte[] decompressLegacy(byte[] data) {
-        try {
-            return EmageCore.decompressMap(data);
-        } catch (Exception e) {
-            logger.log(Level.FINE, "Legacy decompression failed", e);
-            return new byte[MAP_SIZE];
-        }
-    }
-
-    private static byte[] deflateFallback(byte[] data) {
-        try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            baos.write('E');
-            baos.write('M');
-            baos.write('0');
-
-            byte[] compressed = deflate(data, Deflater.DEFAULT_COMPRESSION);
-            DataOutputStream dos = new DataOutputStream(baos);
             dos.writeInt(data.length);
             dos.writeInt(compressed.length);
             dos.write(compressed);
             dos.close();
 
-            return baos.toByteArray();
+            return logicStream.toByteArray();
+
         } catch (IOException e) {
-            logger.log(Level.WARNING, "Deflate fallback failed", e);
+            logger.warning("Could not compress map data. Saving uncompressed. Cause: " + e.getMessage());
             return data;
         }
     }
 
-    private static int getBitsPerPixel(int colorCount) {
-        if (colorCount <= 2) return 1;
-        if (colorCount <= 4) return 2;
-        if (colorCount <= 16) return 4;
-        return 8;
-    }
+    public static byte[] decompressStatic(byte[] compressedData) {
+        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(compressedData))) {
+            byte[] magic = new byte[3];
+            dis.readFully(magic);
 
-    private static byte[] packBits(byte[] data, int bpp) {
-        if (bpp >= 8) return data.clone();
-
-        int pixelsPerByte = 8 / bpp;
-        int packedSize = (data.length + pixelsPerByte - 1) / pixelsPerByte;
-        byte[] packed = new byte[packedSize];
-        int mask = (1 << bpp) - 1;
-
-        for (int i = 0; i < data.length; i++) {
-            int byteIdx = i / pixelsPerByte;
-            int bitOffset = (pixelsPerByte - 1 - (i % pixelsPerByte)) * bpp;
-            packed[byteIdx] |= (byte) ((data[i] & mask) << bitOffset);
-        }
-
-        return packed;
-    }
-
-    private static byte[] unpackBits(byte[] packed, int bpp, int size) {
-        if (bpp >= 8) return Arrays.copyOf(packed, size);
-
-        byte[] unpacked = new byte[size];
-        int pixelsPerByte = 8 / bpp;
-        int mask = (1 << bpp) - 1;
-
-        for (int i = 0; i < size; i++) {
-            int byteIdx = i / pixelsPerByte;
-            if (byteIdx >= packed.length) break;
-            int bitOffset = (pixelsPerByte - 1 - (i % pixelsPerByte)) * bpp;
-            unpacked[i] = (byte) ((packed[byteIdx] >> bitOffset) & mask);
-        }
-
-        return unpacked;
-    }
-
-    private static byte[] deflate(byte[] data, int level) {
-        Deflater deflater = new Deflater(level);
-        try {
-            deflater.setInput(data);
-            deflater.finish();
-
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            byte[] buffer = new byte[4096];
-
-            while (!deflater.finished()) {
-                int count = deflater.deflate(buffer);
-                baos.write(buffer, 0, count);
+            if (!Arrays.equals(magic, MAGIC_HEADER)) {
+                return decompressLegacy(compressedData);
             }
 
-            return baos.toByteArray();
-        } finally {
-            deflater.end();
+            dis.readByte();
+            int rawSize = dis.readInt();
+            int compSize = dis.readInt();
+
+            byte[] zstdData = new byte[compSize];
+            dis.readFully(zstdData);
+
+            return Zstd.decompress(zstdData, rawSize);
+
+        } catch (IOException e) {
+            logger.warning("Could not decompress map data. The map will render blank. Cause: " + e.getMessage());
+            return new byte[EmageCore.MAP_SIZE];
         }
+    }
+
+    public static byte[] decompressLegacy(byte[] data) {
+        if (data == null || data.length < 3) {
+            return new byte[EmageCore.MAP_SIZE];
+        }
+
+        if (data[0] == 'E' && data[1] == 'M' && data[2] == '0') {
+            try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data))) {
+                dis.skipBytes(3);
+
+                int size = dis.readInt();
+                int compSize = dis.readInt();
+
+                if (size < 0 || size > EmageCore.MAP_SIZE * 2 || compSize < 0 || compSize > data.length) {
+                    logger.warning("Invalid legacy map data: size=" + size + ", compSize=" + compSize);
+                    return new byte[EmageCore.MAP_SIZE];
+                }
+
+                byte[] comp = new byte[compSize];
+                dis.readFully(comp);
+
+                return inflate(comp, size);
+            } catch (IOException e) {
+                logger.warning("Could not decompress legacy EM0 map data. Cause: " + e.getMessage());
+                return new byte[EmageCore.MAP_SIZE];
+            }
+        } else if (data[0] == 'E' && data[1] == 'M' && data[2] == '1') {
+            return new byte[EmageCore.MAP_SIZE];
+        }
+
+        logger.fine("Unknown legacy map format: " + (char)data[0] + (char)data[1] + (char)data[2]);
+        return new byte[EmageCore.MAP_SIZE];
+    }
+
+    public static byte[] compressAnimFrames(List<byte[]> frames) {
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            DataOutputStream dos = new DataOutputStream(baos);
+
+            dos.write(MAGIC_HEADER);
+            dos.writeByte(2);
+
+            dos.writeInt(frames.size());
+
+            int totalSize = 0;
+            for (byte[] f : frames) totalSize += f.length;
+
+            byte[] concat = new byte[totalSize];
+            int offset = 0;
+            for (byte[] f : frames) {
+                System.arraycopy(f, 0, concat, offset, f.length);
+                offset += f.length;
+            }
+
+            byte[] compressed = Zstd.compress(concat, 1);
+
+            dos.writeInt(totalSize);
+            dos.writeInt(compressed.length);
+            dos.write(compressed);
+            dos.close();
+
+            return baos.toByteArray();
+
+        } catch (Exception e) {
+            logger.warning("Could not compress GIF frames. Saving uncompressed. Cause: " + e.getMessage());
+            return new byte[0];
+        }
+    }
+
+    public static List<byte[]> decompressAnimFrames(byte[] data) {
+        List<byte[]> list = new ArrayList<>();
+        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data))) {
+            byte[] magic = new byte[3];
+            dis.readFully(magic);
+            if (!Arrays.equals(magic, MAGIC_HEADER)) return list;
+
+            int version = dis.readByte() & 0xFF;
+            if (version != 2) return list;
+
+            int frameCount = dis.readInt();
+            int rawSize = dis.readInt();
+            int compSize = dis.readInt();
+
+            byte[] zstdData = new byte[compSize];
+            dis.readFully(zstdData);
+
+            byte[] decompressed = Zstd.decompress(zstdData, rawSize);
+
+            int frameSize = EmageCore.MAP_SIZE;
+            for (int i = 0; i < frameCount; i++) {
+                byte[] frame = new byte[frameSize];
+                System.arraycopy(decompressed, i * frameSize, frame, 0, frameSize);
+                list.add(frame);
+            }
+
+        } catch (Exception e) {
+            logger.warning("Could not decompress GIF frames. The GIF will not play. Cause: " + e.getMessage());
+        }
+        return list;
     }
 
     private static byte[] inflate(byte[] data, int expectedSize) {
-        Inflater inflater = new Inflater();
+        if (expectedSize <= 0 || expectedSize > EmageCore.MAP_SIZE * 2) {
+            logger.warning("Invalid inflate size: " + expectedSize);
+            return new byte[Math.max(0, Math.min(expectedSize, EmageCore.MAP_SIZE))];
+        }
+
+        java.util.zip.Inflater inflater = new java.util.zip.Inflater();
         try {
             inflater.setInput(data);
-
             byte[] result = new byte[expectedSize];
             int offset = 0;
 
             while (!inflater.finished() && offset < expectedSize) {
-                int count = inflater.inflate(result, offset, expectedSize - offset);
-                if (count == 0 && inflater.needsInput()) break;
-                offset += count;
+                try {
+                    int count = inflater.inflate(result, offset, expectedSize - offset);
+                    if (count == 0 && inflater.needsInput()) {
+                        break;
+                    }
+                    offset += count;
+                } catch (java.util.zip.DataFormatException e) {
+                    logger.warning("Inflate data format error: " + e.getMessage());
+                    break;
+                }
             }
 
             return result;
-        } catch (Exception e) {
-            logger.log(Level.WARNING, "Inflate failed", e);
-            return new byte[expectedSize];
         } finally {
             inflater.end();
-        }
-    }
-
-    private static byte[] readExact(InputStream in, int len) throws IOException {
-        byte[] buf = new byte[len];
-        int offset = 0;
-        while (offset < len) {
-            int read = in.read(buf, offset, len - offset);
-            if (read < 0) throw new IOException("Unexpected end of stream, needed " + len + " bytes, got " + offset);
-            offset += read;
-        }
-        return buf;
-    }
-
-    private static void writeShort(OutputStream out, int value) throws IOException {
-        out.write((value >> 8) & 0xFF);
-        out.write(value & 0xFF);
-    }
-
-    private static int readShort(InputStream in) throws IOException {
-        int b1 = in.read() & 0xFF;
-        int b2 = in.read() & 0xFF;
-        return (b1 << 8) | b2;
-    }
-
-    public static class StaticGridData {
-        public final long gridId;
-        public final Map<Integer, byte[]> cells;
-
-        public StaticGridData(long gridId, Map<Integer, byte[]> cells) {
-            this.gridId = gridId;
-            this.cells = cells;
-        }
-    }
-
-    public static class AnimGridData {
-        public final long syncId;
-        public final Map<Integer, List<byte[]>> cells;
-        public final List<Integer> delays;
-
-        public AnimGridData(long syncId, Map<Integer, List<byte[]>> cells, List<Integer> delays) {
-            this.syncId = syncId;
-            this.cells = cells;
-            this.delays = delays;
         }
     }
 }

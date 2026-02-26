@@ -1,19 +1,22 @@
 package net.edithymaster.emage.Util;
 
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
+import net.edithymaster.emage.Util.MessageUtil;
 
 import java.io.BufferedReader;
+import java.io.IOException;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.CompletableFuture;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.logging.Level;
 
 public class UpdateChecker implements Listener {
 
@@ -35,6 +38,7 @@ public class UpdateChecker implements Listener {
     private long lastCheck = 0;
 
     private volatile boolean checkInProgress = false;
+    private int timerTaskID = -1;
 
     public UpdateChecker(JavaPlugin plugin, String githubOwner, String githubRepo) {
         this.plugin = plugin;
@@ -44,10 +48,10 @@ public class UpdateChecker implements Listener {
 
         Bukkit.getPluginManager().registerEvents(this, plugin);
 
-        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::periodicCheck,
-                20L,
+        timerTaskID = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::periodicCheck,
+                100L,
                 20 * 60 * 60 * 6L
-        );
+        ).getTaskId();
     }
 
     private void periodicCheck() {
@@ -83,7 +87,8 @@ public class UpdateChecker implements Listener {
 
                 int responseCode = connection.getResponseCode();
                 if (responseCode != 200) {
-                    plugin.getLogger().fine("Update check failed: HTTP " + responseCode);
+                    plugin.getLogger().warning("Update check returned HTTP " + responseCode + ". Aborting check.");
+                    connection.disconnect();
                     return false;
                 }
 
@@ -96,32 +101,40 @@ public class UpdateChecker implements Listener {
                 }
 
                 String json = response.toString();
-                latestVersion = extractJsonValue(json, "tag_name");
-                downloadUrl = extractJsonValue(json, "html_url");
-                releaseNotes = extractJsonValue(json, "body");
+
+                try {
+                    @SuppressWarnings("deprecation")
+                    JsonObject obj = new JsonParser().parse(json).getAsJsonObject();
+
+                    if (obj.has("tag_name") && !obj.get("tag_name").isJsonNull()) {
+                        latestVersion = obj.get("tag_name").getAsString();
+                    }
+                    if (obj.has("html_url") && !obj.get("html_url").isJsonNull()) {
+                        downloadUrl = obj.get("html_url").getAsString();
+                    }
+                    if (obj.has("body") && !obj.get("body").isJsonNull()) {
+                        releaseNotes = obj.get("body").getAsString();
+                    }
+                } catch (IllegalStateException | ClassCastException e) {
+                    plugin.getLogger().warning("Could not parse the GitHub API response correctly. The update check was aborted.");
+                }
 
                 if (latestVersion != null) {
                     latestVersion = latestVersion.replaceFirst("^[vV]", "");
-                }
+                    updateAvailable = isNewerVersion(latestVersion, currentVersion);
 
-                updateAvailable = isNewerVersion(latestVersion, currentVersion);
-
-                if (updateAvailable) {
-                    plugin.getLogger().info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                    plugin.getLogger().info("A new update is available: v" + latestVersion);
-                    plugin.getLogger().info("Current version: v" + currentVersion);
-                    plugin.getLogger().info("GitHub: " + GITHUB_URL);
-                    plugin.getLogger().info("Modrinth: " + MODRINTH_URL);
-                    plugin.getLogger().info("SpigotMC: " + SPIGOTMC_URL);
-                    plugin.getLogger().info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-                } else {
-                    plugin.getLogger().fine("Emage is up to date (v" + currentVersion + ")");
+                    if (updateAvailable) {
+                        plugin.getLogger().info("Version " + latestVersion + " is available. You are running v" + currentVersion + ". Download at: " + MODRINTH_URL);
+                    }
                 }
 
                 return updateAvailable;
 
-            } catch (Exception e) {
-                plugin.getLogger().fine("Update check failed: " + e.getMessage());
+            } catch (IOException e) {
+                plugin.getLogger().warning("Network error during update check: " + e.getMessage());
+                return false;
+            } catch (RuntimeException e) {
+                plugin.getLogger().log(Level.SEVERE, "Unexpected error during update check.", e);
                 return false;
             } finally {
                 checkInProgress = false;
@@ -154,49 +167,33 @@ public class UpdateChecker implements Listener {
         }
 
         player.sendMessage("");
-        player.sendMessage("§8§l┃ §b§lEmage Update Available!");
-        player.sendMessage("§8§l┃");
-        player.sendMessage("§8§l┃ §7Current: §cv" + currentVersion);
-        player.sendMessage("§8§l┃ §7Latest: §av" + latestVersion);
-        player.sendMessage("§8§l┃");
-        player.sendMessage("§8§l┃ §7Download from:");
+        player.sendMessage(MessageUtil.colorize("&8&l┃ &b&lEmage Update Available!"));
+        player.sendMessage(MessageUtil.colorize("&8&l┃"));
+        player.sendMessage(MessageUtil.colorize("&8&l┃ &7Current: &cv" + currentVersion));
+        player.sendMessage(MessageUtil.colorize("&8&l┃ &7Latest: &av" + latestVersion));
+        player.sendMessage(MessageUtil.colorize("&8&l┃"));
+        player.sendMessage(MessageUtil.colorize("&8&l┃ &7Download from:"));
 
-        sendClickableLink(player, "GitHub", GITHUB_URL, "§7Open GitHub releases page");
-        sendClickableLink(player, "Modrinth", MODRINTH_URL, "§7Open Modrinth page");
-        sendClickableLink(player, "SpigotMC", SPIGOTMC_URL, "§7Open SpigotMC page");
+        sendClickableLink(player, "GitHub", GITHUB_URL, "&7Open GitHub releases page");
+        sendClickableLink(player, "Modrinth", MODRINTH_URL, "&7Open Modrinth page");
+        sendClickableLink(player, "SpigotMC", SPIGOTMC_URL, "&7Open SpigotMC page");
 
         player.sendMessage("");
     }
 
     private void sendClickableLink(Player player, String name, String url, String hoverText) {
         try {
-            net.md_5.bungee.api.chat.TextComponent message = new net.md_5.bungee.api.chat.TextComponent("§8§l┃   §e§n" + name);
+            net.md_5.bungee.api.chat.TextComponent message = new net.md_5.bungee.api.chat.TextComponent(MessageUtil.colorize("&8&l┃   &e&n" + name));
             message.setClickEvent(new net.md_5.bungee.api.chat.ClickEvent(
                     net.md_5.bungee.api.chat.ClickEvent.Action.OPEN_URL, url));
             message.setHoverEvent(new net.md_5.bungee.api.chat.HoverEvent(
                     net.md_5.bungee.api.chat.HoverEvent.Action.SHOW_TEXT,
-                    new net.md_5.bungee.api.chat.ComponentBuilder(hoverText + "\n§8" + url).create()));
+                    new net.md_5.bungee.api.chat.ComponentBuilder(MessageUtil.colorize(hoverText + "\n&8" + url)).create()));
 
             player.spigot().sendMessage(message);
         } catch (Exception e) {
-            player.sendMessage("§8§l┃   §e" + name + ": §7" + url);
+            player.sendMessage(MessageUtil.colorize("&8&l┃   &e" + name + ": &7" + url));
         }
-    }
-
-    private String extractJsonValue(String json, String key) {
-        try {
-            Pattern pattern = Pattern.compile("\"" + key + "\"\\s*:\\s*\"([^\"]*?)\"");
-            Matcher matcher = pattern.matcher(json);
-
-            if (matcher.find()) {
-                return matcher.group(1)
-                        .replace("\\n", "\n")
-                        .replace("\\r", "")
-                        .replace("\\\"", "\"");
-            }
-        } catch (Exception ignored) {
-        }
-        return null;
     }
 
     private boolean isNewerVersion(String remoteVersion, String localVersion) {
@@ -239,35 +236,15 @@ public class UpdateChecker implements Listener {
         }
     }
 
-    public boolean isUpdateAvailable() {
-        return updateAvailable;
-    }
-
-    public String getLatestVersion() {
-        return latestVersion;
-    }
-
     public String getCurrentVersion() {
         return currentVersion;
     }
 
-    public String getDownloadUrl() {
-        return downloadUrl;
-    }
-
-    public String getReleaseNotes() {
-        return releaseNotes;
-    }
-
-    public static String getGithubUrl() {
-        return GITHUB_URL;
-    }
-
-    public static String getModrinthUrl() {
-        return MODRINTH_URL;
-    }
-
-    public static String getSpigotmcUrl() {
-        return SPIGOTMC_URL;
+    public void shutdown() {
+        if (timerTaskID != -1) {
+            Bukkit.getScheduler().cancelTask(timerTaskID);
+            timerTaskID = -1;
+        }
+        org.bukkit.event.HandlerList.unregisterAll(this);
     }
 }

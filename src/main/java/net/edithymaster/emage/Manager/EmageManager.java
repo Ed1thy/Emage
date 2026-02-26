@@ -1,58 +1,76 @@
 package net.edithymaster.emage.Manager;
 
+import com.google.gson.Gson;
+import com.google.gson.reflect.TypeToken;
+import net.edithymaster.emage.Processing.EmageCompression;
+import net.edithymaster.emage.Storage.DatabaseManager;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
-import org.bukkit.event.EventHandler;
-import org.bukkit.event.EventPriority;
-import org.bukkit.event.Listener;
-import org.bukkit.event.server.MapInitializeEvent;
-import org.bukkit.event.world.WorldLoadEvent;
 import org.bukkit.map.MapView;
 import org.bukkit.plugin.java.JavaPlugin;
 import net.edithymaster.emage.Config.EmageConfig;
-import net.edithymaster.emage.Processing.EmageCompression;
-import net.edithymaster.emage.Render.EmageRenderer;
 import net.edithymaster.emage.Render.GifRenderer;
 
-import java.io.*;
-import java.nio.file.Files;
+import java.io.File;
+import java.lang.reflect.Type;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 
-public final class EmageManager implements Listener {
+public final class EmageManager {
 
     private final JavaPlugin plugin;
     private final EmageConfig config;
-    private final File mapsFolder;
+    private final DatabaseManager db;
+    private final Gson gson = new Gson();
 
     private final Set<Integer> managedMaps = ConcurrentHashMap.newKeySet();
     private final Map<Integer, CachedMapData> mapCache = new ConcurrentHashMap<>();
     private final Set<Integer> appliedMaps = ConcurrentHashMap.newKeySet();
 
-    private final Map<Long, PendingStaticGrid> pendingStaticGrids = new ConcurrentHashMap<>();
-    private final Map<Long, PendingAnimGrid> pendingAnimGrids = new ConcurrentHashMap<>();
+    private final Map<Long, PendingGrid> pendingGrids = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService scheduler;
 
     private final Set<Integer> pendingMapInits = ConcurrentHashMap.newKeySet();
     private final AtomicBoolean mapInitTaskScheduled = new AtomicBoolean(false);
+    private final Queue<Integer> recycledMapIds = new ConcurrentLinkedQueue<>();
 
-    private final ExecutorService ioExecutor;
-    private final ScheduledExecutorService scheduler;
+    private final AtomicBoolean databaseReady = new AtomicBoolean(false);
+    private final AtomicBoolean mapsLoaded = new AtomicBoolean(false);
+
+    private final AtomicLong lastWorldSaveTime = new AtomicLong(0);
 
     public EmageManager(JavaPlugin plugin, EmageConfig config) {
         this.plugin = plugin;
         this.config = config;
-        this.mapsFolder = new File(plugin.getDataFolder(), "maps");
-        if (!mapsFolder.exists()) {
-            mapsFolder.mkdirs();
-        }
 
-        this.ioExecutor = Executors.newSingleThreadExecutor(r -> {
-            Thread t = new Thread(r, "Emage-IO");
-            t.setDaemon(true);
-            t.setPriority(Thread.MIN_PRIORITY);
-            return t;
+        this.db = new DatabaseManager(plugin);
+
+        db.initAsync().thenCompose(success -> {
+            if (success) {
+                databaseReady.set(true);
+                plugin.getLogger().info("Database ready, loading maps...");
+                return db.loadAllRecycledIdsAsync();
+            } else {
+                plugin.getLogger().severe("Database initialization failed. Map persistence is disabled.");
+                return CompletableFuture.completedFuture((Queue<Integer>) null);
+            }
+        }).thenAccept(ids -> {
+            try {
+                if (ids != null) {
+                    recycledMapIds.addAll(ids);
+                }
+                if (databaseReady.get()) {
+                    loadAllMapsInternal();
+                }
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.SEVERE, "Unexpected error in Database async callback", e);
+            }
+        }).exceptionally(throwable -> {
+            plugin.getLogger().log(Level.SEVERE, "Database initialization threw an exception.", throwable);
+            return null;
         });
 
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -62,14 +80,15 @@ public final class EmageManager implements Listener {
         });
     }
 
-    public void shutdown() {
-        for (PendingStaticGrid grid : pendingStaticGrids.values()) {
-            grid.saveNow();
-        }
-        for (PendingAnimGrid grid : pendingAnimGrids.values()) {
-            grid.saveNow();
-        }
+    public boolean isReady() {
+        return databaseReady.get() && mapsLoaded.get();
+    }
 
+    public boolean isDatabaseReady() {
+        return databaseReady.get() && db.isReady();
+    }
+
+    public void shutdown() {
         scheduler.shutdown();
         try {
             if (!scheduler.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -80,612 +99,418 @@ public final class EmageManager implements Listener {
             Thread.currentThread().interrupt();
         }
 
-        ioExecutor.shutdown();
-        try {
-            if (!ioExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
-                ioExecutor.shutdownNow();
-            }
-        } catch (InterruptedException e) {
-            ioExecutor.shutdownNow();
-            Thread.currentThread().interrupt();
+        for (PendingGrid grid : pendingGrids.values()) {
+            grid.flushSync();
         }
+        pendingGrids.clear();
+
+        db.shutdown();
+        databaseReady.set(false);
+        mapsLoaded.set(false);
     }
 
-    public void saveMap(int mapId, byte[] data) {
-        saveMap(mapId, data, System.nanoTime());
+    public MapView allocateMap(World world) {
+        int attempts = recycledMapIds.size();
+        for (int i = 0; i < attempts; i++) {
+            Integer recycledId = recycledMapIds.poll();
+            if (recycledId == null) break;
+
+            MapView view = Bukkit.getMap(recycledId);
+
+            if (view != null) {
+                if (isDatabaseReady()) {
+                    db.removeFromPool(recycledId);
+                }
+                List<org.bukkit.map.MapRenderer> renderers = new ArrayList<>(view.getRenderers());
+                for (org.bukkit.map.MapRenderer r : renderers) {
+                    view.removeRenderer(r);
+                }
+                view.setTrackingPosition(false);
+                view.setUnlimitedTracking(false);
+
+                plugin.getLogger().fine("Reused recycled Map ID: " + recycledId);
+                return view;
+            } else {
+                recycledMapIds.add(recycledId);
+            }
+        }
+
+        return Bukkit.createMap(world);
     }
 
     public void saveMap(int mapId, byte[] data, long gridId) {
-        boolean isNew = managedMaps.add(mapId);
+        managedMaps.add(mapId);
         mapCache.put(mapId, new CachedMapData(data, null, null, 0, gridId, false));
-        if (isNew) {
-            config.incrementMapCount();
-        }
+        config.incrementMapCount();
 
-        synchronized (pendingStaticGrids) {
-            PendingStaticGrid grid = pendingStaticGrids.get(gridId);
-            if (grid != null && grid.saving) {
-                grid = null;
-            }
-            if (grid == null) {
-                grid = new PendingStaticGrid(gridId);
-                pendingStaticGrids.put(gridId, grid);
-            }
-            grid.addCell(mapId, data);
-            grid.scheduleSave();
+        if (isDatabaseReady()) {
+            pendingGrids.computeIfAbsent(gridId, PendingGrid::new)
+                    .addStatic(mapId, data)
+                    .scheduleSave();
+        } else {
+            plugin.getLogger().warning("Cannot save map " + mapId + ": database not ready. Data cached in memory only.");
         }
     }
 
     public void saveGif(int mapId, List<byte[]> frames, List<Integer> delays, int avgDelay, long syncId) {
-        boolean isNew = managedMaps.add(mapId);
-        mapCache.put(mapId, new CachedMapData(null, new ArrayList<>(frames),
-                new ArrayList<>(delays), avgDelay, syncId, true));
-        if (isNew) {
-            config.incrementMapCount();
-            config.incrementAnimationCount();
-        }
+        managedMaps.add(mapId);
+        mapCache.put(mapId, new CachedMapData(null, frames, new ArrayList<>(delays), avgDelay, syncId, true));
+        config.incrementMapCount();
+        config.incrementAnimationCount();
 
-        synchronized (pendingAnimGrids) {
-            PendingAnimGrid grid = pendingAnimGrids.get(syncId);
-            if (grid != null && grid.saving) {
-                grid = null;
-            }
-            if (grid == null) {
-                grid = new PendingAnimGrid(syncId, delays);
-                pendingAnimGrids.put(syncId, grid);
-            }
-            grid.addCell(mapId, frames);
-            grid.scheduleSave();
+        if (isDatabaseReady()) {
+            pendingGrids.computeIfAbsent(syncId, PendingGrid::new)
+                    .addAnim(mapId, frames, delays)
+                    .scheduleSave();
+        } else {
+            plugin.getLogger().warning("Cannot save GIF " + mapId + ": database not ready. Data cached in memory only.");
         }
     }
 
-    private class PendingStaticGrid {
-        final long gridId;
-        final Map<Integer, byte[]> cells = new ConcurrentHashMap<>();
-        private ScheduledFuture<?> saveTask;
+    private class PendingGrid {
+        final long id;
+        final Map<Integer, byte[]> statics = new HashMap<>();
+        final Map<Integer, AnimSaveData> anims = new HashMap<>();
+        private ScheduledFuture<?> task;
         volatile boolean saving = false;
 
-        PendingStaticGrid(long gridId) {
-            this.gridId = gridId;
+        PendingGrid(long id) {
+            this.id = id;
         }
 
-        void addCell(int mapId, byte[] data) {
-            cells.put(mapId, data.clone());
+        synchronized PendingGrid addStatic(int mapId, byte[] data) {
+            statics.put(mapId, data);
+            return this;
+        }
+
+        synchronized PendingGrid addAnim(int mapId, List<byte[]> frames, List<Integer> delays) {
+            anims.put(mapId, new AnimSaveData(frames, delays));
+            return this;
         }
 
         synchronized void scheduleSave() {
             if (saving) return;
-            if (saveTask != null) saveTask.cancel(false);
-            saveTask = scheduler.schedule(this::saveNow, 500, TimeUnit.MILLISECONDS);
+            if (task != null) task.cancel(false);
+            task = scheduler.schedule(this::saveNowAsync, 500, TimeUnit.MILLISECONDS);
         }
 
-        void saveNow() {
+        void saveNowAsync() {
+            if (!isDatabaseReady()) {
+                plugin.getLogger().warning("Skipping save for grid " + id + ": database not ready.");
+                return;
+            }
+
             synchronized (this) {
                 if (saving) return;
                 saving = true;
             }
 
-            synchronized (pendingStaticGrids) {
-                PendingStaticGrid current = pendingStaticGrids.get(gridId);
-                if (current == this) {
-                    pendingStaticGrids.remove(gridId);
-                }
+            Map<Integer, byte[]> sCopy;
+            Map<Integer, AnimSaveData> aCopy;
+
+            synchronized (this) {
+                sCopy = new HashMap<>(statics);
+                aCopy = new HashMap<>(anims);
+                statics.clear();
+                anims.clear();
             }
 
-            final Map<Integer, byte[]> cellsCopy = new HashMap<>(cells);
-
-            ioExecutor.submit(() -> {
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
                 try {
-                    if (cellsCopy.size() == 1) {
-                        Map.Entry<Integer, byte[]> entry = cellsCopy.entrySet().iterator().next();
-                        int mapId = entry.getKey();
-                        byte[] data = entry.getValue();
-
-                        byte[] compressed = EmageCompression.compressSingleStatic(data);
-                        File file = new File(mapsFolder, mapId + ".emap");
-                        Files.write(file.toPath(), compressed);
-
-                        plugin.getLogger().info("Saved static map " + mapId + ": " +
-                                data.length + " -> " + compressed.length + " bytes");
-                    } else {
-                        byte[] compressed = EmageCompression.compressStaticGrid(cellsCopy, gridId);
-                        File file = new File(mapsFolder, "static_" + gridId + ".esgrid");
-                        Files.write(file.toPath(), compressed);
-
-                        int rawSize = cellsCopy.size() * 16384;
-                        plugin.getLogger().info("Saved static grid: " + cellsCopy.size() + " cells, " +
-                                formatSize(rawSize) + " -> " + formatSize(compressed.length));
+                    for (Map.Entry<Integer, byte[]> entry : sCopy.entrySet()) {
+                        byte[] compressed = EmageCompression.compressSingleStatic(entry.getValue());
+                        db.saveMap(entry.getKey(), id, compressed);
+                    }
+                    for (Map.Entry<Integer, AnimSaveData> entry : aCopy.entrySet()) {
+                        byte[] compressed = EmageCompression.compressAnimFrames(entry.getValue().frames);
+                        String meta = gson.toJson(entry.getValue().delays);
+                        db.saveAnimMap(entry.getKey(), id, compressed, meta);
                     }
                 } catch (Exception e) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to save static grid " + gridId, e);
+                    plugin.getLogger().log(Level.WARNING, "Could not save grid " + id + " to the database.", e);
+                    synchronized (PendingGrid.this) {
+                        statics.putAll(sCopy);
+                        anims.putAll(aCopy);
+                    }
+                } finally {
+                    synchronized (PendingGrid.this) {
+                        saving = false;
+                        if (!statics.isEmpty() || !anims.isEmpty()) {
+                            scheduleSave();
+                        } else {
+                            pendingGrids.remove(id);
+                        }
+                    }
                 }
             });
+        }
+
+        void flushSync() {
+            Map<Integer, byte[]> sCopy;
+            Map<Integer, AnimSaveData> aCopy;
+
+            synchronized (this) {
+                if (task != null) task.cancel(false);
+                sCopy = new HashMap<>(statics);
+                aCopy = new HashMap<>(anims);
+                statics.clear();
+                anims.clear();
+            }
+
+            List<CompletableFuture<Void>> waitFutures = new ArrayList<>();
+
+            for (Map.Entry<Integer, byte[]> entry : sCopy.entrySet()) {
+                try {
+                    byte[] compressed = EmageCompression.compressSingleStatic(entry.getValue());
+                    waitFutures.add(db.saveMapAsync(entry.getKey(), id, compressed));
+                } catch (Exception e) {
+                    plugin.getLogger().log(Level.WARNING,
+                            "Could not flush map " + entry.getKey() + " during shutdown.", e);
+                }
+            }
+            for (Map.Entry<Integer, AnimSaveData> entry : aCopy.entrySet()) {
+                try {
+                    byte[] compressed = EmageCompression.compressAnimFrames(entry.getValue().frames);
+                    String meta = gson.toJson(entry.getValue().delays);
+                    waitFutures.add(db.saveAnimMapAsync(entry.getKey(), id, compressed, meta));
+                } catch (Exception e) {
+                    plugin.getLogger().log(Level.WARNING,
+                            "Could not flush GIF " + entry.getKey() + " during shutdown.", e);
+                }
+            }
+
+            try {
+                CompletableFuture.allOf(waitFutures.toArray(new CompletableFuture[0])).get(5, TimeUnit.SECONDS);
+            } catch (Exception e) {
+                plugin.getLogger().log(Level.WARNING, "Timeout or interruption while flushing maps", e);
+            }
         }
     }
 
-
-    private class PendingAnimGrid {
-        final long syncId;
+    private static class AnimSaveData {
+        final List<byte[]> frames;
         final List<Integer> delays;
-        final Map<Integer, List<byte[]>> cells = new ConcurrentHashMap<>();
-        private ScheduledFuture<?> saveTask;
-        volatile boolean saving = false;
 
-        PendingAnimGrid(long syncId, List<Integer> delays) {
-            this.syncId = syncId;
-            this.delays = delays != null ? new ArrayList<>(delays) : new ArrayList<>();
-        }
-
-        void addCell(int mapId, List<byte[]> frames) {
-            cells.put(mapId, frames);
-        }
-
-        synchronized void scheduleSave() {
-            if (saving) return;
-            if (saveTask != null) saveTask.cancel(false);
-            saveTask = scheduler.schedule(this::saveNow, 2000, TimeUnit.MILLISECONDS);
-        }
-
-        void saveNow() {
-            synchronized (this) {
-                if (saving) return;
-                saving = true;
-            }
-
-            synchronized (pendingAnimGrids) {
-                PendingAnimGrid current = pendingAnimGrids.get(syncId);
-                if (current == this) {
-                    pendingAnimGrids.remove(syncId);
-                }
-            }
-
-            final Map<Integer, List<byte[]>> cellsCopy = new HashMap<>(cells);
-            final List<Integer> delaysCopy = new ArrayList<>(delays);
-
-            ioExecutor.submit(() -> {
-                try {
-                    byte[] compressed = EmageCompression.compressAnimGrid(cellsCopy, delaysCopy, syncId);
-                    File file = new File(mapsFolder, "anim_" + syncId + ".eagrid");
-                    Files.write(file.toPath(), compressed);
-
-                    int frameCount = cellsCopy.isEmpty() ? 0 : cellsCopy.values().iterator().next().size();
-                    plugin.getLogger().info("Saved animation: " + cellsCopy.size() + " cells, " + frameCount + " frames");
-                } catch (Exception e) {
-                    plugin.getLogger().log(Level.WARNING, "Failed to save animation " + syncId, e);
-                }
-            });
+        AnimSaveData(List<byte[]> f, List<Integer> d) {
+            this.frames = f;
+            this.delays = d;
         }
     }
 
     public void loadAllMaps() {
-        plugin.getLogger().info("Loading saved maps...");
-
-        int staticLoaded = 0;
-        int animLoaded = 0;
-
-        File[] animGridFiles = mapsFolder.listFiles((dir, name) -> name.endsWith(".eagrid"));
-        if (animGridFiles != null) {
-            for (File file : animGridFiles) {
-                try {
-                    byte[] data = Files.readAllBytes(file.toPath());
-                    EmageCompression.AnimGridData grid = EmageCompression.decompressAnimGrid(data);
-                    if (grid != null) {
-                        animLoaded += applyAnimGrid(grid);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().warning("Failed to load: " + file.getName());
-                }
-            }
+        if (!databaseReady.get()) {
+            plugin.getLogger().info("Database still initializing. Maps will load automatically when ready.");
+            return;
         }
 
-        File[] staticGridFiles = mapsFolder.listFiles((dir, name) -> name.endsWith(".esgrid"));
-        if (staticGridFiles != null) {
-            for (File file : staticGridFiles) {
-                try {
-                    byte[] data = Files.readAllBytes(file.toPath());
-                    EmageCompression.StaticGridData grid = EmageCompression.decompressStaticGrid(data);
-                    if (grid != null) {
-                        staticLoaded += applyStaticGrid(grid);
-                    }
-                } catch (Exception e) {
-                    plugin.getLogger().warning("Failed to load: " + file.getName());
-                }
-            }
+        if (mapsLoaded.get()) {
+            plugin.getLogger().info("Maps already loaded.");
+            return;
         }
 
-        File[] emapFiles = mapsFolder.listFiles((dir, name) -> name.endsWith(".emap"));
-        if (emapFiles != null) {
-            for (File file : emapFiles) {
-                try {
-                    int mapId = Integer.parseInt(file.getName().replace(".emap", ""));
-                    if (!managedMaps.contains(mapId)) {
-                        byte[] data = Files.readAllBytes(file.toPath());
-                        byte[] mapData = EmageCompression.decompressSingleStatic(data);
-                        if (applyStaticMap(mapId, mapData)) {
-                            staticLoaded++;
-                        }
-                    }
-                } catch (NumberFormatException ignored) {
-                } catch (Exception e) {
-                    plugin.getLogger().warning("Failed to load emap: " + file.getName());
-                }
-            }
-        }
-
-        loadLegacyFiles();
-
-        config.setMapCount(staticLoaded + animLoaded);
-        config.setAnimationCount(animLoaded);
-
-        plugin.getLogger().info("Loaded " + staticLoaded + " static, " + animLoaded + " animations");
+        loadAllMapsInternal();
     }
 
-    private void loadLegacyFiles() {
-        File[] oldGridFiles = mapsFolder.listFiles((dir, name) ->
-                name.startsWith("grid_") && name.endsWith(".egrid"));
-        if (oldGridFiles != null) {
-            for (File file : oldGridFiles) {
-                try {
-                    byte[] data = Files.readAllBytes(file.toPath());
-                    EmageCompression.AnimGridData grid = EmageCompression.decompressAnimGrid(data);
-                    if (grid != null) {
-                        applyAnimGrid(grid);
-                    }
-                } catch (Exception ignored) {}
-            }
-        }
-    }
+    private void loadAllMapsInternal() {
+        db.loadAllMapsAsync().thenAccept(rawData -> {
+            Set<Integer> loadedIds = new HashSet<>();
 
-    private int applyStaticGrid(EmageCompression.StaticGridData grid) {
-        int count = 0;
-        for (Map.Entry<Integer, byte[]> entry : grid.cells.entrySet()) {
-            if (applyStaticMap(entry.getKey(), entry.getValue())) {
-                count++;
-            }
-        }
-        return count;
-    }
+            int staticCount = 0;
+            int animCount = 0;
 
-    private int applyAnimGrid(EmageCompression.AnimGridData grid) {
-        GifRenderer.resetSyncTime(grid.syncId);
-
-        int count = 0;
-        int avgDelay = grid.delays.isEmpty() ? 100 :
-                (int) grid.delays.stream().mapToInt(Integer::intValue).average().orElse(100);
-
-        for (Map.Entry<Integer, List<byte[]>> entry : grid.cells.entrySet()) {
-            int mapId = entry.getKey();
-            List<byte[]> frames = entry.getValue();
-
-            managedMaps.add(mapId);
-            mapCache.put(mapId, new CachedMapData(null, frames, grid.delays, avgDelay, grid.syncId, true));
-
-            @SuppressWarnings("deprecation")
-            MapView mapView = Bukkit.getMap(mapId);
-            if (mapView != null) {
-                applyAnimRenderer(mapView, frames, grid.delays, grid.syncId);
-                appliedMaps.add(mapId);
-                count++;
-            }
-        }
-
-        return count;
-    }
-
-    private boolean applyStaticMap(int mapId, byte[] data) {
-        managedMaps.add(mapId);
-        mapCache.put(mapId, new CachedMapData(data, null, null, 0, 0, false));
-
-        @SuppressWarnings("deprecation")
-        MapView mapView = Bukkit.getMap(mapId);
-        if (mapView != null) {
-            applyStaticRenderer(mapView, data);
-            appliedMaps.add(mapId);
-            return true;
-        }
-        return false;
-    }
-
-    private void applyStaticRenderer(MapView mapView, byte[] data) {
-        mapView.getRenderers().forEach(mapView::removeRenderer);
-        mapView.setTrackingPosition(false);
-        mapView.setUnlimitedTracking(false);
-        mapView.addRenderer(new EmageRenderer(data));
-    }
-
-    private void applyAnimRenderer(MapView mapView, List<byte[]> frames, List<Integer> delays, long syncId) {
-        mapView.getRenderers().forEach(mapView::removeRenderer);
-        mapView.setTrackingPosition(false);
-        mapView.setUnlimitedTracking(false);
-
-        GifRenderer renderer = new GifRenderer(frames, delays, syncId);
-        renderer.setMapView(mapView);
-        mapView.addRenderer(renderer);
-    }
-
-    @EventHandler(priority = EventPriority.MONITOR)
-    public void onMapInitialize(MapInitializeEvent event) {
-        @SuppressWarnings("deprecation")
-        int mapId = event.getMap().getId();
-
-        if (appliedMaps.contains(mapId)) return;
-        if (!mapCache.containsKey(mapId)) return;
-
-        pendingMapInits.add(mapId);
-
-        if (mapInitTaskScheduled.compareAndSet(false, true)) {
-            Bukkit.getScheduler().runTaskLater(plugin, () -> {
-                mapInitTaskScheduled.set(false);
-                Set<Integer> toApply = new HashSet<>(pendingMapInits);
-                pendingMapInits.clear();
-
-                for (int id : toApply) {
-                    if (appliedMaps.contains(id)) continue;
-                    CachedMapData cached = mapCache.get(id);
-                    if (cached == null) continue;
-
-                    @SuppressWarnings("deprecation")
-                    MapView view = Bukkit.getMap(id);
-                    if (view == null) continue;
-
-                    appliedMaps.add(id);
-                    if (cached.isAnimation) {
-                        applyAnimRenderer(view, cached.frames, cached.delays, cached.syncId);
-                    } else if (cached.staticData != null) {
-                        applyStaticRenderer(view, cached.staticData);
-                    }
-                }
-            }, 1L);
-        }
-    }
-
-    @EventHandler
-    public void onWorldSave(org.bukkit.event.world.WorldSaveEvent event) {
-        for (PendingStaticGrid grid : pendingStaticGrids.values()) {
-            grid.saveNow();
-        }
-        for (PendingAnimGrid grid : pendingAnimGrids.values()) {
-            grid.saveNow();
-        }
-    }
-
-    @EventHandler
-    public void onWorldLoad(WorldLoadEvent event) {
-        World loadedWorld = event.getWorld();
-        Bukkit.getScheduler().runTaskLater(plugin, () -> {
-            for (Map.Entry<Integer, CachedMapData> entry : mapCache.entrySet()) {
+            for (Map.Entry<Integer, DatabaseManager.MapData> entry : rawData.entrySet()) {
                 int mapId = entry.getKey();
-                if (appliedMaps.contains(mapId)) continue;
+                DatabaseManager.MapData data = entry.getValue();
 
-                @SuppressWarnings("deprecation")
-                MapView mapView = Bukkit.getMap(mapId);
-                if (mapView != null && loadedWorld.equals(mapView.getWorld())) {
-                    CachedMapData cached = entry.getValue();
-                    if (cached.isAnimation) {
-                        applyAnimRenderer(mapView, cached.frames, cached.delays, cached.syncId);
-                    } else if (cached.staticData != null) {
-                        applyStaticRenderer(mapView, cached.staticData);
-                    }
-                    appliedMaps.add(mapId);
-                }
-            }
-        }, 40L);
-    }
+                managedMaps.add(mapId);
 
-    public int cleanupUnusedFiles(Set<Integer> mapsInUse) {
-        int deleted = 0;
-        File[] files = mapsFolder.listFiles();
-        if (files == null) return 0;
+                try {
+                    if (data.isAnim) {
+                        List<byte[]> frames = EmageCompression.decompressAnimFrames(data.data);
+                        if (frames.isEmpty()) continue;
 
-        plugin.getLogger().info("Cleanup: Found " + mapsInUse.size() + " maps in use, scanning " + files.length + " files...");
+                        List<Integer> delays = parseDelays(data.metaJson);
+                        int avgDelay = (int) delays.stream().mapToInt(i -> i).average().orElse(100);
 
-        for (File file : files) {
-            String name = file.getName();
-
-            try {
-                boolean shouldDelete = false;
-                Set<Integer> fileMapIds = new HashSet<>();
-
-                if (name.endsWith(".emap")) {
-                    int mapId = Integer.parseInt(name.replace(".emap", ""));
-                    fileMapIds.add(mapId);
-                    shouldDelete = !mapsInUse.contains(mapId);
-
-                } else if (name.startsWith("static_") && name.endsWith(".esgrid")) {
-                    fileMapIds = getMapIdsFromGridFile(file);
-                    shouldDelete = !hasAnyMapInUse(fileMapIds, mapsInUse);
-
-                } else if (name.startsWith("anim_") && name.endsWith(".eagrid")) {
-                    fileMapIds = getMapIdsFromGridFile(file);
-                    shouldDelete = !hasAnyMapInUse(fileMapIds, mapsInUse);
-
-                } else if (name.startsWith("grid_") && name.endsWith(".egrid")) {
-                    fileMapIds = getMapIdsFromLegacyGridFile(file);
-                    shouldDelete = !hasAnyMapInUse(fileMapIds, mapsInUse);
-
-                } else if (name.endsWith(".eanim")) {
-                    int mapId = Integer.parseInt(name.replace(".eanim", ""));
-                    fileMapIds.add(mapId);
-                    shouldDelete = !mapsInUse.contains(mapId);
-                }
-
-                if (shouldDelete && !fileMapIds.isEmpty()) {
-                    plugin.getLogger().info("Cleanup: Deleting " + name + " (maps: " + fileMapIds + ")");
-                    if (file.delete()) {
-                        deleted++;
-                        for (int mapId : fileMapIds) {
-                            removeRenderers(mapId);
-
-                            managedMaps.remove(mapId);
-                            mapCache.remove(mapId);
-                            appliedMaps.remove(mapId);
-                        }
+                        mapCache.put(mapId, new CachedMapData(null, frames, delays, avgDelay, data.syncId, true));
+                        loadedIds.add(mapId);
+                        animCount++;
                     } else {
-                        plugin.getLogger().warning("Cleanup: Failed to delete " + name);
+                        byte[] decompressed = EmageCompression.decompressStatic(data.data);
+                        mapCache.put(mapId, new CachedMapData(decompressed, null, null, 0, data.gridId, false));
+                        loadedIds.add(mapId);
+                        staticCount++;
                     }
+                } catch (Exception e) {
+                    plugin.getLogger().warning("Could not decompress map " + mapId +
+                            " from the database. It will be skipped. Cause: " + e.getMessage());
                 }
-            } catch (NumberFormatException e) {
-                plugin.getLogger().fine("Cleanup: Skipping non-map file " + name);
-            } catch (Exception e) {
-                plugin.getLogger().warning("Cleanup: Error processing " + name + ": " + e.getMessage());
             }
-        }
 
-        plugin.getLogger().info("Cleanup: Deleted " + deleted + " unused files");
-        return deleted;
+            final int finalStatic = staticCount;
+            final int finalAnim = animCount;
+            final Set<Integer> finalLoadedIds = loadedIds;
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                int appliedCount = 0;
+                for (int mapId : finalLoadedIds) {
+                    if (applyRendererToMap(mapId)) appliedCount++;
+                }
+                config.setMapCount(finalStatic + finalAnim);
+                config.setAnimationCount(finalAnim);
+                mapsLoaded.set(true);
+                plugin.getLogger().info("Loaded " + finalStatic + " static maps and " +
+                        finalAnim + " GIFs. Applied " + appliedCount + " renderers.");
+            });
+        });
     }
 
-    private boolean hasAnyMapInUse(Set<Integer> fileMapIds, Set<Integer> mapsInUse) {
-        for (int mapId : fileMapIds) {
-            if (mapsInUse.contains(mapId)) {
-                return true;
+    private List<Integer> parseDelays(String json) {
+        if (json == null || json.isEmpty()) return Collections.singletonList(100);
+        try {
+            Type listType = new TypeToken<ArrayList<Integer>>() {}.getType();
+            List<Integer> list = gson.fromJson(json, listType);
+            return (list != null && !list.isEmpty()) ? list : Collections.singletonList(100);
+        } catch (Exception e) {
+            plugin.getLogger().warning("Could not parse frame delays for a GIF. " +
+                    "Defaulting to 100ms per frame. Payload: " + json);
+            return Collections.singletonList(100);
+        }
+    }
+
+    public boolean applyRendererToMap(int mapId) {
+        if (appliedMaps.contains(mapId)) return false;
+
+        CachedMapData cached = mapCache.get(mapId);
+        if (cached == null) return false;
+
+        MapView mapView = Bukkit.getMap(mapId);
+        if (mapView == null) return false;
+
+        appliedMaps.add(mapId);
+
+        new ArrayList<>(mapView.getRenderers()).forEach(mapView::removeRenderer);
+        mapView.setTrackingPosition(false);
+        mapView.setUnlimitedTracking(false);
+
+        if (cached.isAnimation) {
+            new GifRenderer(mapId, cached.frames, cached.delays, cached.syncId);
+        }
+
+        return true;
+    }
+
+    public void flushAllPendingSavesAsync() {
+        for (PendingGrid grid : pendingGrids.values()) {
+            grid.saveNowAsync();
+        }
+    }
+
+    public void destroyMapData(int mapId) {
+        CachedMapData cached = mapCache.remove(mapId);
+        boolean wasManaged = managedMaps.remove(mapId);
+        appliedMaps.remove(mapId);
+
+        if (wasManaged) {
+            config.decrementMapCount();
+            if (cached != null && cached.isAnimation) {
+                config.decrementAnimationCount();
             }
         }
-        return false;
+
+        removeRenderers(mapId);
+
+        if (isDatabaseReady()) {
+            Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+                db.deleteMaps(Collections.singleton(mapId));
+                db.addToPool(mapId);
+                recycledMapIds.add(mapId);
+            });
+        }
+    }
+
+    public void cleanupUnusedFiles(Set<Integer> mapsInUse, java.util.function.Consumer<Integer> callback) {
+        if (!isDatabaseReady()) {
+            callback.accept(0);
+            return;
+        }
+
+        db.loadAllMapsAsync().thenAccept(dbMaps -> {
+            Set<Integer> dbIds = dbMaps.keySet();
+            Set<Integer> toDelete = new HashSet<>();
+
+            for (int id : dbIds) {
+                if (!mapsInUse.contains(id)) toDelete.add(id);
+            }
+
+            final int count = toDelete.size();
+
+            if (!toDelete.isEmpty()) {
+                db.deleteMaps(toDelete);
+
+                for (int id : toDelete) {
+                    db.addToPool(id);
+                }
+            }
+
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                for (int id : toDelete) {
+                    CachedMapData cached = mapCache.remove(id);
+                    boolean wasManaged = managedMaps.remove(id);
+                    appliedMaps.remove(id);
+
+                    if (wasManaged) {
+                        config.decrementMapCount();
+                        if (cached != null && cached.isAnimation) config.decrementAnimationCount();
+                    }
+
+                    removeRenderers(id);
+                }
+                callback.accept(count);
+            });
+        });
     }
 
     private void removeRenderers(int mapId) {
-        @SuppressWarnings("deprecation")
         MapView mapView = Bukkit.getMap(mapId);
         if (mapView != null) {
-            for (org.bukkit.map.MapRenderer renderer : new ArrayList<>(mapView.getRenderers())) {
-                if (renderer instanceof GifRenderer gifRenderer) {
-                    gifRenderer.remove();
-                }
-                mapView.removeRenderer(renderer);
-            }
+            new ArrayList<>(mapView.getRenderers()).forEach(mapView::removeRenderer);
         }
-
         GifRenderer.removeByMapId(mapId);
     }
 
-    private Set<Integer> getMapIdsFromGridFile(File file) {
-        Set<Integer> mapIds = new HashSet<>();
-
-        try (DataInputStream dis = new DataInputStream(new FileInputStream(file))) {
-            int m1 = dis.readByte() & 0xFF;
-            int m2 = dis.readByte() & 0xFF;
-            int m3 = dis.readByte() & 0xFF;
-
-            if (m1 != 'E' || m2 != 'G') {
-                return mapIds;
-            }
-
-            dis.readLong();
-
-            int cellCount = dis.readShort() & 0xFFFF;
-
-            if (m3 == 'A') {
-                dis.readShort();
-            }
-
-            for (int i = 0; i < cellCount; i++) {
-                mapIds.add(dis.readInt());
-            }
-
-        } catch (IOException e) {
-            plugin.getLogger().fine("Could not read map IDs from " + file.getName() + ": " + e.getMessage());
-        }
-
-        return mapIds;
-    }
-
-    private Set<Integer> getMapIdsFromLegacyGridFile(File file) {
-        Set<Integer> mapIds = new HashSet<>();
-
-        try (DataInputStream dis = new DataInputStream(new FileInputStream(file))) {
-            int m1 = dis.readByte() & 0xFF;
-            int m2 = dis.readByte() & 0xFF;
-
-            if (m1 != 'E' || m2 != 'G') {
-                return mapIds;
-            }
-
-            dis.readByte();
-            dis.readLong();
-            dis.readInt();
-            dis.readInt();
-
-        } catch (IOException e) {
-            plugin.getLogger().fine("Could not read map IDs from legacy " + file.getName());
-        }
-
-        try {
-            Set<Integer> ids = EmageCompression.getMapIdsFromFile(file);
-            if (!ids.isEmpty()) {
-                return ids;
-            }
-        } catch (Exception ignored) {}
-
-        return mapIds;
-    }
-
-    public int migrateOldFormats() {
-        return 0;
-    }
-
     public MapStats getStats() {
-        int staticCount = 0;
-        int animCount = 0;
-        long totalSize = 0;
-
-        File[] files = mapsFolder.listFiles();
-        if (files != null) {
-            for (File file : files) {
-                totalSize += file.length();
-                String name = file.getName();
-                if (name.endsWith(".emap") || name.endsWith(".esgrid")) staticCount++;
-                else if (name.endsWith(".eagrid")) animCount++;
-            }
-        }
-
-        return new MapStats(staticCount, animCount, totalSize, managedMaps.size(),
-                config.getPerformanceStatus());
-    }
-
-    private String formatSize(long bytes) {
-        if (bytes < 1024) return bytes + " B";
-        if (bytes < 1024 * 1024) return String.format("%.1f KB", bytes / 1024.0);
-        return String.format("%.2f MB", bytes / (1024.0 * 1024.0));
+        int animCount = (int) mapCache.values().stream().filter(c -> c.isAnimation).count();
+        int totalManaged = managedMaps.size();
+        return new MapStats(
+                Math.max(0, totalManaged - animCount),
+                animCount,
+                0,
+                totalManaged,
+                config.getPerformanceStatus()
+        );
     }
 
     public File getMapsFolder() {
-        return mapsFolder;
+        return plugin.getDataFolder();
     }
 
-    private static class CachedMapData {
-        final byte[] staticData;
-        final List<byte[]> frames;
-        final List<Integer> delays;
-        final int avgDelay;
-        final long syncId;
-        final boolean isAnimation;
+    public static class CachedMapData {
+        public final byte[] staticData;
+        public final List<byte[]> frames;
+        public final List<Integer> delays;
+        public final int avgDelay;
+        public final long syncId;
+        public final boolean isAnimation;
 
-        CachedMapData(byte[] staticData, List<byte[]> frames, List<Integer> delays,
-                      int avgDelay, long syncId, boolean isAnimation) {
+        public CachedMapData(byte[] staticData, List<byte[]> frames, List<Integer> delays,
+                             int avgDelay, long syncId, boolean isAnimation) {
             this.staticData = staticData;
             this.frames = frames;
             this.delays = delays;
             this.avgDelay = avgDelay;
             this.syncId = syncId;
             this.isAnimation = isAnimation;
-        }
-    }
-
-    public void removeMap(int mapId) {
-        managedMaps.remove(mapId);
-        mapCache.remove(mapId);
-        appliedMaps.remove(mapId);
-
-        @SuppressWarnings("deprecation")
-        MapView mapView = Bukkit.getMap(mapId);
-        if (mapView != null) {
-            for (org.bukkit.map.MapRenderer renderer : mapView.getRenderers()) {
-                if (renderer instanceof GifRenderer gifRenderer) {
-                    gifRenderer.remove();
-                }
-                mapView.removeRenderer(renderer);
-            }
         }
     }
 
@@ -711,4 +536,13 @@ public final class EmageManager implements Listener {
             return String.format("%.2f MB", totalSizeBytes / (1024.0 * 1024.0));
         }
     }
+
+    public Set<Integer> getAppliedMaps() { return appliedMaps; }
+    public Map<Integer, CachedMapData> getMapCache() { return mapCache; }
+    public Set<Integer> getPendingMapInits() { return pendingMapInits; }
+    public AtomicBoolean getMapInitTaskScheduled() { return mapInitTaskScheduled; }
+    public boolean applyRendererToMapPublic(int mapId) { return applyRendererToMap(mapId); }
+    public AtomicLong getLastWorldSaveTime() { return lastWorldSaveTime; }
+    public Set<Integer> getManagedMaps() { return managedMaps; }
+    public void destroyMapDataPublic(int mapId) { destroyMapData(mapId); }
 }

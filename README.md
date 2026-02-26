@@ -1,78 +1,108 @@
 # Emage 🎨
 
-A Minecraft plugin for displaying images and animated GIFs on item frames. Supports grid detection, dithering and compression.
+A Minecraft plugin that lets you display images and GIFs on item frames. Point at a frame, run a command with a URL, and the image gets rendered onto the map. Works with grids of item frames for larger displays.
 
 [![Modrinth](https://img.shields.io/modrinth/dt/emage?logo=modrinth&label=Modrinth&color=00AF5C)](https://modrinth.com/plugin/emage)
 [![SpigotMC](https://img.shields.io/badge/SpigotMC-Download-orange)](https://www.spigotmc.org/resources/emage.130410/)
-[![GitHub](https://img.shields.io/github/v/release/EdithyLikesToCode/Emage?logo=github&label=GitHub)](https://github.com/Ed1thy/Emage)
-
-> ⚠️ **Remember, this is Minecraft.** The color palette is limited to the map color table, and GIF playback is bound by server tick rate and packet throughput. The color accuracy and animation performance doesn't get much better than this. it's about as good as it gets within Minecraft's constraints.
-
-## Features
-
-- **Static images** - PNG, JPG, and any format supported by Java's ImageIO. Rendered with Floyd-Steinberg dithering by default.
-- **Animated GIFs** - Full GIF support including per-frame delays, disposal methods, and frame positioning. Experimental.
-- **Grid detection** - BFS-based. Works on all six block faces (walls, floors, ceilings). Up to 10x10 for images, 4x4 for GIFs (configurable).
-- **Three quality modes** - Fast (ordered/Bayer), Balanced (Floyd-Steinberg), High (Jarvis-Judice-Ninke). All gamma-corrected.
-- **Async processing** - Image downloads, resizing, and dithering run on a dedicated thread pool. The server thread only handles the final map application.
-- **Adaptive performance** - The plugin monitors player count, active map count, and memory pressure, then adjusts animation FPS, render distance, and update intervals automatically.
-- **Distance culling** - Animation packets are only sent to players within render distance. Per-player packet budgets prevent network saturation.
-- **GIF caching** - Processed GIF data is kept in memory (LRU, 30 minute expiry, 100MB cap) so re-applying the same GIF doesn't require reprocessing.
-- **Memory pooling** - Map byte buffers (16KB each) are pooled and reused to reduce GC pressure.
-- **Persistent storage** - All rendered maps survive restarts. Grids are stored as single compressed files rather than one file per map.
-- **Cleanup tools** - Scans item frames and player inventories to find which maps are still in use, then deletes orphaned files.
-- **SSRF protection** - Blocks requests to loopback, link-local, and private addresses. Validates URL schemes, enforces redirect limits, and caps download size at 50MB.
+[![GitHub](https://img.shields.io/github/v/release/Ed1thy/Emage?logo=github&label=GitHub)](https://github.com/Ed1thy/Emage)
 
 ---
 
-## Screenshots
+### 🎉 GIFs are now fully supported!
 
-| 3x3 | 9x9 |
-|:---:|:---:|
-| ![Static](https://cdn.imgchest.com/files/1047bf5e0c63.png) | ![Grid](https://cdn.imgchest.com/files/554f1415a4fd.png) |
+GIF animations have been completely reworked. They now run on a dedicated render thread with delta encoding, meaning you can have hundreds of GIFs on your server with little to no impact on performance.
+
+---
+
+## Features
+
+- **Static images** - Download and render any image onto item frames. Supports grids up to 16×16 by default (configurable).
+- **Animated GIFs** - GIFs play back as animations on item frames, up to 5×5 grids by default (configurable).
+- **Automatic grid detection** - Place item frames in a rectangle, look at one, and the plugin figures out the full grid layout. You can also specify a size manually.
+- **Persistent storage** - Images and GIFs survive server restarts. Data is stored in a local SQLite database with Zstd compression.
+- **Adaptive performance** - The plugin adjusts animation FPS, render distance, and update rates based on player count, active maps, and memory usage. Can be disabled.
+- **GIF caching** - Processed GIFs are cached in memory so re-applying the same GIF is instant.
+- **Configurable** - Rate limits, download limits, grid size caps, memory ceilings, and all messages are configurable.
+
+## Requirements
+
+- Java 17+
+- Spigot or Paper 1.18+
+- [PacketEvents](https://github.com/retrooper/packetevents)
+
+## Installation
+
+1. Install [PacketEvents](https://modrinth.com/plugin/packetevents) if you haven't already.
+2. Drop the Emage jar into your `plugins/` folder.
+3. Start the server. On first run, the color palette cache will be built - this takes a few seconds.
+4. Edit `plugins/Emage/config.yml` if you want to change defaults.
+
+## Usage
+
+1. Place item frames on a wall in a grid pattern (e.g., 3×3).
+2. Look at one of the frames.
+3. Run `/emage <url>` or `/emage <url> 3x3` to specify a size.
+
+The plugin detects the connected frames, downloads the image, dithers it to Minecraft's map color palette, and applies it.
+
+For GIFs, append `-nocache` to force reprocessing instead of using a cached version.
+
+```
+/emage https://example.com/image.png
+/emage https://example.com/image.png 3x3
+/emage https://example.com/animation.gif 2x2 -nocache
+```
+
+Breaking an item frame that has an Emage map on it will clean up the associated data and recycle the map ID.
 
 ## Commands
 
 | Command | Description | Permission |
-|:--------|:------------|:-----------|
-| `/emage <url> [size] [flags]` | Render an image onto item frames | `emage.use` |
-| `/emage help` | Show command reference | `emage.use` |
-| `/emage reload` | Reload config | `emage.admin` |
-| `/emage cleanup` | Delete unused map files | `emage.admin` |
-| `/emage stats` | Show storage stats | `emage.admin` |
-| `/emage perf` | Show performance stats | `emage.admin` |
-| `/emage cache` | Show GIF cache stats | `emage.admin` |
-| `/emage clearcache` | Clear the GIF cache | `emage.admin` |
-| `/emage update` | Check for updates | `emage.admin` |
+|--|--|--|
+| `/emage <url> [WxH]` | Apply an image or GIF to the targeted item frame grid | `emage.use` |
+| `/emage help` | Show command help | `emage.use` |
+| `/emage reload` | Reload the config | `emage.admin` |
+| `/emage stats` | Show storage statistics | `emage.admin` |
+| `/emage perf` | Show performance info (FPS, render distance, cache) | `emage.admin` |
+| `/emage cache` | Show GIF cache statistics | `emage.admin` |
+| `/emage clearcache` | Clear the GIF processing cache | `emage.admin` |
+| `/emage cleanup` | Scan for and delete unused map data | `emage.admin` |
+| `/emage update` | Check for a new version | `emage.admin` |
+| `/emage synccolors` | Re-sync the map color palette with the server and rebuild the cache | `emage.admin` |
 
-## Flags
+## Permissions
 
-| Flag | Aliases | Effect |
-|:-----|:--------|:-------|
-| `--fast` | `-f`, `--low`, `--speed` | Ordered dithering. Fastest, lowest quality. |
-| `--balanced` | `-b`, `--normal` | Floyd-Steinberg. Default. |
-| `--high` | `-h`, `--hq`, `--quality` | Jarvis-Judice-Ninke. Slowest, best quality. |
-| `--nocache` | `--nc`, `--fresh` | Ignore cached GIF data and reprocess from scratch. |
+| Permission | Default | Description |
+|--|--|--|
+| `emage.use` | Everyone | Use `/emage` to apply images |
+| `emage.admin` | OP | Access admin subcommands and receive update notifications on join |
 
----
+## Configuration
 
-## Installation
+The config file (`config.yml`) covers:
 
-1. Download from [Modrinth](https://modrinth.com/plugin/emage), [SpigotMC](https://www.spigotmc.org/resources/emage.130410/), or [GitHub Releases](https://github.com/Ed1thy/Emage/releases).
-2. Drop `Emage.jar` into your `plugins` folder.
-3. Restart the server. The first startup takes a moment while the color lookup cache is built.
-4. Config is at `plugins/Emage/config.yml` if you want to adjust limits or performance settings.
+- **Performance** - Max/min FPS for GIF animations (default 20–60), render distance (default 32 blocks), max packets per player per tick, and adaptive scaling toggle.
+- **Quality** - Max GIF frames (240), max grid size for GIFs (5×5) and static images (16×16).
+- **Memory** - Soft memory ceiling for adaptive performance scaling (256 MB default).
+- **Downloads** - Max file size (50 MB), connection/read timeouts, max redirects, and an option to block downloads from internal/local network addresses (enabled by default).
+- **Cache** - Max cached GIFs (20), max cache memory (100 MB), and expiry time (30 minutes).
+- **Rate limits** - Cooldown between commands per player (5 seconds) and max concurrent processing tasks server-wide (3).
+- **Messages** - Every player-facing message is customizable with hex color support (`&#RRGGBB`).
 
-## Usage
+All values have sensible defaults. Most servers won't need to change anything.
 
-Place item frames on a wall (or floor/ceiling) in a grid, look at one of them, and run the command.
+## How it works (briefly)
 
+Images are downloaded, scaled to fit the item frame grid, and dithered using a Jarvis error-diffusion algorithm in linear color space. Color matching uses CIEDE2000 against Minecraft's ~208 map palette colors, with a precomputed lookup table for speed.
+
+GIF frames are decoded with proper disposal method handling, dithered with inter-frame stability (unchanged regions reuse previous results), and sent to players as map packets via PacketEvents. Only pixels that changed between frames are transmitted (delta encoding), and packets are only sent to players within render distance who are looking toward the frames. Animation ticking runs on a separate thread and adapts to server load, so GIF playback has little to no effect on main-thread performance.
+
+Map data is stored in SQLite with Zstd compression. Legacy file-based storage (maps/ folder with .emap files) is automatically migrated on first run.
+
+## Building
+
+```bash
+mvn clean package
 ```
-/emage https://example.com/photo.png
-/emage https://example.com/photo.png 3x3
-/emage https://example.com/photo.png --high
-/emage https://example.com/animation.gif 2x2 --fast
-/emage https://example.com/animation.gif --nocache
-```
 
-If you don't specify a size, the plugin uses whatever grid it detects. If you do specify a size, it anchors from the frame you're looking at.
+Requires Java 17. The output jar will be in `target/`.

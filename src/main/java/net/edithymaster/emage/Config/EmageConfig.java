@@ -39,8 +39,6 @@ public class EmageConfig {
     private int maxImageGridSize;
 
     // Memory
-    private boolean useMemoryPool;
-    private int poolSize;
     private long maxMemoryMB;
 
     // Downloads
@@ -59,11 +57,15 @@ public class EmageConfig {
     private long cooldownMs;
     private int maxConcurrentTasks;
 
+    private int adaptiveTaskID = -1;
+
     public EmageConfig(JavaPlugin plugin) {
         this.plugin = plugin;
         reload();
 
-        Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, this::adaptPerformance, 100L, 100L);
+        adaptiveTaskID = Bukkit.getScheduler().runTaskTimer(
+                plugin, this::adaptPerformance, 100L, 100L
+        ).getTaskId();
     }
 
     public void reload() {
@@ -84,8 +86,6 @@ public class EmageConfig {
         maxImageGridSize = config.getInt("quality.max-image-grid-size", 10);
 
         // Memory
-        useMemoryPool = config.getBoolean("memory.use-pool", true);
-        poolSize = config.getInt("memory.pool-size", 100);
         maxMemoryMB = config.getLong("memory.max-usage-mb", 256);
 
         // Downloads
@@ -104,36 +104,31 @@ public class EmageConfig {
         cooldownMs = config.getLong("rate-limits.cooldown-seconds", 5) * 1000;
         maxConcurrentTasks = config.getInt("rate-limits.max-concurrent-tasks", 3);
 
+        maxFps = Math.max(1, maxFps);
+        minFps = Math.max(1, minFps);
+        if (minFps > maxFps) minFps = maxFps;
+        maxPacketsPerTick = Math.max(1, maxPacketsPerTick);
+        maxRenderDistance = Math.max(8, maxRenderDistance);
+        maxGifFrames = Math.max(1, maxGifFrames);
+        maxGridSize = Math.max(1, maxGridSize);
+        maxGifGridSize = Math.max(1, maxGifGridSize);
+        maxImageGridSize = Math.max(1, maxImageGridSize);
+        maxMemoryMB = Math.max(32, maxMemoryMB);
+        maxDownloadBytes = Math.max(1024 * 1024, maxDownloadBytes);
+        connectTimeout = Math.max(1000, connectTimeout);
+        readTimeout = Math.max(1000, readTimeout);
+        maxRedirects = Math.max(0, maxRedirects);
+        cacheMaxEntries = Math.max(0, cacheMaxEntries);
+        cacheExpireMs = Math.max(60000, cacheExpireMs);
+        cooldownMs = Math.max(0, cooldownMs);
+        maxConcurrentTasks = Math.max(1, maxConcurrentTasks);
+
         effectiveFps = maxFps;
         effectiveRenderDistance = maxRenderDistance;
         effectiveUpdateInterval = 1;
         effectiveDistanceCulling = true;
 
-        if (maxFps < 1) maxFps = 1;
-        if (minFps < 1) minFps = 1;
-        if (minFps > maxFps) minFps = maxFps;
-        if (maxPacketsPerTick < 1) maxPacketsPerTick = 1;
-        if (maxRenderDistance < 8) maxRenderDistance = 8;
-        if (maxGifFrames < 1) maxGifFrames = 1;
-        if (maxGridSize < 1) maxGridSize = 1;
-        if (maxGifGridSize < 1) maxGifGridSize = 1;
-        if (maxImageGridSize < 1) maxImageGridSize = 1;
-        if (poolSize < 0) poolSize = 0;
-        if (maxMemoryMB < 32) maxMemoryMB = 32;
-        if (maxDownloadBytes < 1024 * 1024) maxDownloadBytes = 1024 * 1024;
-        if (connectTimeout < 1000) connectTimeout = 1000;
-        if (readTimeout < 1000) readTimeout = 1000;
-        if (maxRedirects < 0) maxRedirects = 0;
-        if (cacheMaxEntries < 0) cacheMaxEntries = 0;
-        if (cacheExpireMs < 60000) cacheExpireMs = 60000;
-        if (cooldownMs < 0) cooldownMs = 0;
-        if (maxConcurrentTasks < 1) maxConcurrentTasks = 1;
-
-        effectiveFps = maxFps;
-        effectiveRenderDistance = maxRenderDistance;
-
-        EmageCore.setUsePool(useMemoryPool);
-        EmageCore.setMaxPoolSize(poolSize);
+        adaptPerformance();
     }
 
     private void adaptPerformance() {
@@ -206,8 +201,6 @@ public class EmageConfig {
     public void decrementAnimationCount() { activeAnimationCount.decrementAndGet(); }
     public void setMapCount(int count) { activeMapCount.set(count); }
     public void setAnimationCount(int count) { activeAnimationCount.set(count); }
-    public void addMemoryUsage(long bytes) { totalMemoryUsed.addAndGet(bytes); }
-    public void removeMemoryUsage(long bytes) { totalMemoryUsed.addAndGet(-bytes); }
 
     // Performance getters
 
@@ -215,25 +208,17 @@ public class EmageConfig {
     public int getRenderDistanceSquared() { return effectiveRenderDistance * effectiveRenderDistance; }
     public int getAnimationFps() { return effectiveFps; }
     public int getMapUpdateInterval() { return effectiveUpdateInterval; }
-    public boolean useDistanceCulling() { return effectiveDistanceCulling; }
-    public long getFrameTimeNanos() { return 1_000_000_000L / effectiveFps; }
     public int getMaxPacketsPerTick() { return maxPacketsPerTick; }
     public boolean isAdaptivePerformance() { return adaptivePerformance; }
-    public int getMaxFps() { return maxFps; }
-    public int getMinFps() { return minFps; }
-    public int getMaxRenderDistance() { return maxRenderDistance; }
 
     // Quality getters
 
     public int getMaxGifFrames() { return maxGifFrames; }
-    public int getMaxGridSize() { return maxGridSize; }
     public int getMaxGifGridSize() { return maxGifGridSize; }
     public int getMaxImageGridSize() { return maxImageGridSize; }
 
     // Memory getters
 
-    public boolean useMemoryPool() { return useMemoryPool; }
-    public int getPoolSize() { return poolSize; }
     public long getMaxMemoryMB() { return maxMemoryMB; }
 
     // Download getters
@@ -257,12 +242,16 @@ public class EmageConfig {
 
     // Status
 
-    public int getActiveMapCount() { return activeMapCount.get(); }
-    public int getActiveAnimationCount() { return activeAnimationCount.get(); }
-
     public String getPerformanceStatus() {
         return String.format("FPS: %d, Distance: %d, Interval: %d, Culling: %s",
                 effectiveFps, effectiveRenderDistance, effectiveUpdateInterval,
                 effectiveDistanceCulling ? "ON" : "OFF");
+    }
+
+    public void shutdown() {
+        if (adaptiveTaskID != -1) {
+            Bukkit.getScheduler().cancelTask(adaptiveTaskID);
+            adaptiveTaskID = -1;
+        }
     }
 }

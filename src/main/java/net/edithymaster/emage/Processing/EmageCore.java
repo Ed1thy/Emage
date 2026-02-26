@@ -6,7 +6,6 @@ import java.io.*;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.*;
@@ -14,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import javax.imageio.IIOException;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.metadata.IIOMetadata;
@@ -29,62 +29,36 @@ public final class EmageCore {
 
     private static final Logger logger = Logger.getLogger(EmageCore.class.getName());
 
-    public static final int MAP_SIZE = 16384;
     public static final int MAP_WIDTH = 128;
+    public static final int MAP_SIZE = MAP_WIDTH * MAP_WIDTH;
 
     private static final AtomicInteger THREAD_COUNTER = new AtomicInteger(0);
     private static final Set<String> ALLOWED_SCHEMES = Set.of("http", "https");
     private static volatile EmageConfig activeConfig = null;
 
-    private static final ExecutorService EXECUTOR = Executors.newFixedThreadPool(
-            Math.max(1, Runtime.getRuntime().availableProcessors() / 2),
-            r -> {
-                Thread t = new Thread(r, "Emage-Processor-" + THREAD_COUNTER.incrementAndGet());
-                t.setDaemon(true);
-                t.setPriority(Thread.MIN_PRIORITY);
-                return t;
-            }
-    );
+    private static final double MAX_ERROR = 0.15;
+    private static final double GLOBAL_DAMPENER = 0.55;
+    private static final double CHROMA_DAMPENER = 0.20;
 
-    private static final ThreadLocal<double[]> TL_LIN_R = new ThreadLocal<>();
-    private static final ThreadLocal<double[]> TL_LIN_G = new ThreadLocal<>();
-    private static final ThreadLocal<double[]> TL_LIN_B = new ThreadLocal<>();
-    private static final ThreadLocal<boolean[]> TL_TRANSPARENT = new ThreadLocal<>();
+    private static volatile ExecutorService EXECUTOR;
 
-    private static final ConcurrentLinkedQueue<byte[]> BUFFER_POOL = new ConcurrentLinkedQueue<>();
-    private static volatile boolean usePool = true;
-    private static volatile int maxPoolSize = 100;
-
-    public enum Quality {
-        FAST,
-        BALANCED,
-        HIGH
-    }
-
-    public static void setUsePool(boolean use) {
-        usePool = use;
-    }
-
-    public static boolean isUsePool() {
-        return usePool;
-    }
-
-    public static int getPoolSize() {
-        return BUFFER_POOL.size();
-    }
-
-    public static void setMaxPoolSize(int size) {
-        maxPoolSize = size;
-    }
-
-    public static byte[] acquireBuffer() {
-        if (usePool) {
-            byte[] buf = BUFFER_POOL.poll();
-            if (buf != null) {
-                return buf;
+    public static ExecutorService getExecutor() {
+        if (EXECUTOR == null || EXECUTOR.isShutdown()) {
+            synchronized (EmageCore.class) {
+                if (EXECUTOR == null || EXECUTOR.isShutdown()) {
+                    EXECUTOR = Executors.newFixedThreadPool(
+                            Math.max(1, Runtime.getRuntime().availableProcessors() / 2),
+                            r -> {
+                                Thread t = new Thread(r, "Emage-Processor-" + THREAD_COUNTER.incrementAndGet());
+                                t.setDaemon(true);
+                                t.setPriority(Thread.NORM_PRIORITY - 1);
+                                return t;
+                            }
+                    );
+                }
             }
         }
-        return new byte[MAP_SIZE];
+        return EXECUTOR;
     }
 
     public static void setConfig(EmageConfig config) {
@@ -111,18 +85,12 @@ public final class EmageCore {
         return activeConfig != null ? activeConfig.blockInternalUrls() : true;
     }
 
-    public static void releaseBuffer(byte[] buffer) {
-        if (usePool && buffer != null && buffer.length == MAP_SIZE && BUFFER_POOL.size() < maxPoolSize) {
-            Arrays.fill(buffer, (byte) 0);
-            BUFFER_POOL.offer(buffer);
-        }
-    }
-
-    public static void clearAllPools() {
-        BUFFER_POOL.clear();
-    }
-
     public static void initColorSystem() {
+        EmageColors.detectAndSetMaxValidIndex();
+        EmageColors.syncWithServer();
+    }
+
+    public static void initColorSystemAsync() {
         EmageColors.initCache();
     }
 
@@ -130,93 +98,45 @@ public final class EmageCore {
         return EmageColors.matchColor(r, g, b);
     }
 
-    public static Color getColor(byte index) {
-        return EmageColors.getColor(index);
-    }
-
     private static int clamp(int value) {
         return Math.max(0, Math.min(255, value));
     }
 
-    public static BufferedImage resize(BufferedImage src, int width, int height) {
-        if (src.getWidth() == width && src.getHeight() == height) {
+    public static BufferedImage resize(BufferedImage src, int targetW, int targetH) {
+        if (src.getWidth() == targetW && src.getHeight() == targetH) {
             return src;
         }
 
-        if (src.getWidth() > width * 2 || src.getHeight() > height * 2) {
-            return progressiveResize(src, width, height);
-        }
-
-        BufferedImage dest = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
-        Graphics2D g = dest.createGraphics();
-        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-        g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-        g.drawImage(src, 0, 0, width, height, null);
+        BufferedImage result = new BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = result.createGraphics();
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+        g.drawImage(src, 0, 0, targetW, targetH, null);
         g.dispose();
-        return dest;
-    }
-
-    private static BufferedImage progressiveResize(BufferedImage src, int targetW, int targetH) {
-        BufferedImage current = src;
-        int w = current.getWidth();
-        int h = current.getHeight();
-
-        while (w > targetW * 2 || h > targetH * 2) {
-            int nextW = Math.max(targetW, w / 2);
-            int nextH = Math.max(targetH, h / 2);
-
-            BufferedImage next = new BufferedImage(nextW, nextH, BufferedImage.TYPE_INT_ARGB);
-            Graphics2D g = next.createGraphics();
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g.drawImage(current, 0, 0, nextW, nextH, null);
-            g.dispose();
-
-            current = next;
-            w = nextW;
-            h = nextH;
-        }
-
-        if (w != targetW || h != targetH) {
-            BufferedImage dest = new BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_ARGB);
-            Graphics2D g = dest.createGraphics();
-            g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
-            g.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY);
-            g.drawImage(current, 0, 0, targetW, targetH, null);
-            g.dispose();
-            current = dest;
-        }
-
-        return current;
+        return result;
     }
 
     public static byte[] dither(BufferedImage img) {
-        return dither(img, Quality.BALANCED);
+        int w = img.getWidth();
+        int h = img.getHeight();
+        int[] pixels = new int[w * h];
+        img.getRGB(0, 0, w, h, pixels, 0, w);
+        return ditherPixels(pixels, w, h);
     }
 
-    public static byte[] dither(BufferedImage img, Quality quality) {
-        BufferedImage prepared = prepareImage(img, MAP_WIDTH, MAP_WIDTH);
-        int[] pixels = new int[MAP_SIZE];
-        prepared.getRGB(0, 0, MAP_WIDTH, MAP_WIDTH, pixels, 0, MAP_WIDTH);
-        return ditherPixels(pixels, quality);
+    public static byte[] ditherPixels(int[] pixels, int width, int height) {
+        return ditherJarvisGammaCorrected(pixels, width, height);
     }
 
-    public static byte[] ditherPixels(int[] pixels, Quality quality) {
-        return switch (quality) {
-            case FAST -> ditherOrdered(pixels);
-            case BALANCED -> ditherFloydSteinberg(pixels);
-            case HIGH -> ditherJarvisGammaCorrected(pixels);
-        };
-    }
-
-    public static byte[] ditherPixelsStable(int[] pixels, int[] prevPixels, byte[] prevResult, Quality quality) {
+    public static byte[] ditherPixelsStable(int[] pixels, int width, int height, int[] prevPixels, byte[] prevResult) {
         if (prevPixels == null || prevResult == null) {
-            return ditherPixels(pixels, quality);
+            return ditherPixels(pixels, width, height);
         }
 
-        boolean[] changed = new boolean[MAP_SIZE];
+        int size = width * height;
+        boolean[] changed = new boolean[size];
         int changeCount = 0;
-        for (int i = 0; i < MAP_SIZE; i++) {
+        for (int i = 0; i < size; i++) {
             if (pixels[i] != prevPixels[i]) {
                 changed[i] = true;
                 changeCount++;
@@ -224,25 +144,23 @@ public final class EmageCore {
         }
 
         if (changeCount == 0) {
-            byte[] result = acquireBuffer();
-            System.arraycopy(prevResult, 0, result, 0, MAP_SIZE);
-            return result;
+            return prevResult;
         }
 
-        if (changeCount > MAP_SIZE / 2) {
-            return ditherPixels(pixels, quality);
+        if (changeCount > size / 2) {
+            return ditherPixels(pixels, width, height);
         }
 
-        boolean[] dilated = new boolean[MAP_SIZE];
-        for (int y = 0; y < MAP_WIDTH; y++) {
-            for (int x = 0; x < MAP_WIDTH; x++) {
-                if (!changed[y * MAP_WIDTH + x]) continue;
+        boolean[] dilated = new boolean[size];
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if (!changed[y * width + x]) continue;
                 int yMin = Math.max(0, y - 2);
-                int yMax = Math.min(MAP_WIDTH - 1, y + 2);
+                int yMax = Math.min(height - 1, y + 2);
                 int xMin = Math.max(0, x - 2);
-                int xMax = Math.min(MAP_WIDTH - 1, x + 2);
+                int xMax = Math.min(width - 1, x + 2);
                 for (int dy = yMin; dy <= yMax; dy++) {
-                    int rowOff = dy * MAP_WIDTH;
+                    int rowOff = dy * width;
                     for (int dx = xMin; dx <= xMax; dx++) {
                         dilated[rowOff + dx] = true;
                     }
@@ -250,15 +168,61 @@ public final class EmageCore {
             }
         }
 
-        byte[] fullDither = ditherPixels(pixels, quality);
+        byte[] fullDither = ditherPixels(pixels, width, height);
 
-        for (int i = 0; i < MAP_SIZE; i++) {
+        for (int i = 0; i < size; i++) {
             if (!dilated[i]) {
                 fullDither[i] = prevResult[i];
             }
         }
 
         return fullDither;
+    }
+
+    private static void calculateConstrainedError(double[] outError, double tr, double tg, double tb, double pr, double pg, double pb) {
+        double eR = tr - pr;
+        double eG = tg - pg;
+        double eB = tb - pb;
+
+        double eY = 0.2126 * eR + 0.7152 * eG + 0.0722 * eB;
+        double eCr = eR - eY;
+        double eCg = eG - eY;
+        double eCb = eB - eY;
+
+        eCr *= CHROMA_DAMPENER;
+        eCg *= CHROMA_DAMPENER;
+        eCb *= CHROMA_DAMPENER;
+
+        eR = eY + eCr;
+        eG = eY + eCg;
+        eB = eY + eCb;
+
+        double maxC = Math.max(tr, Math.max(tg, tb));
+        double minC = Math.min(tr, Math.min(tg, tb));
+        double saturation = (maxC <= 0.001) ? 0.0 : ((maxC - minC) / maxC);
+
+        if (saturation < 0.20) {
+            double weight = saturation / 0.20;
+            eR = eY * (1.0 - weight) + eR * weight;
+            eG = eY * (1.0 - weight) + eG * weight;
+            eB = eY * (1.0 - weight) + eB * weight;
+        }
+
+        eR *= GLOBAL_DAMPENER;
+        eG *= GLOBAL_DAMPENER;
+        eB *= GLOBAL_DAMPENER;
+
+        double mag = Math.sqrt(eR * eR + eG * eG + eB * eB);
+        if (mag > MAX_ERROR) {
+            double scale = MAX_ERROR / mag;
+            eR *= scale;
+            eG *= scale;
+            eB *= scale;
+        }
+
+        outError[0] = eR;
+        outError[1] = eG;
+        outError[2] = eB;
     }
 
     private static BufferedImage prepareImage(BufferedImage src, int width, int height) {
@@ -268,56 +232,17 @@ public final class EmageCore {
         return resize(src, width, height);
     }
 
-    private static final int[][] BAYER_8X8 = {
-            { 0, 32,  8, 40,  2, 34, 10, 42},
-            {48, 16, 56, 24, 50, 18, 58, 26},
-            {12, 44,  4, 36, 14, 46,  6, 38},
-            {60, 28, 52, 20, 62, 30, 54, 22},
-            { 3, 35, 11, 43,  1, 33,  9, 41},
-            {51, 19, 59, 27, 49, 17, 57, 25},
-            {15, 47,  7, 39, 13, 45,  5, 37},
-            {63, 31, 55, 23, 61, 29, 53, 21}
-    };
+    private static byte[] ditherJarvisGammaCorrected(int[] pixels, int width, int height) {
+        int size = width * height;
+        byte[] result = new byte[size];
+        double[] errOut = new double[3];
 
-    private static byte[] ditherOrdered(int[] pixels) {
-        byte[] result = acquireBuffer();
+        double[] linR = new double[size];
+        double[] linG = new double[size];
+        double[] linB = new double[size];
+        boolean[] transparent = new boolean[size];
 
-        for (int i = 0; i < MAP_SIZE; i++) {
-            int rgb = pixels[i];
-            if (((rgb >> 24) & 0xFF) < 128) {
-                result[i] = 0;
-                continue;
-            }
-
-            int x = i & 127;
-            int y = i >> 7;
-            float threshold = (BAYER_8X8[y & 7][x & 7] / 64.0f) - 0.5f;
-            float strength = 24.0f;
-
-            int r = clamp((int) (((rgb >> 16) & 0xFF) + threshold * strength));
-            int g = clamp((int) (((rgb >> 8) & 0xFF) + threshold * strength));
-            int b = clamp((int) ((rgb & 0xFF) + threshold * strength));
-
-            result[i] = matchColor(r, g, b);
-        }
-
-        return result;
-    }
-
-    private static byte[] ditherFloydSteinberg(int[] pixels) {
-        byte[] result = acquireBuffer();
-
-        double[] linR = getLinR();
-        double[] linG = getLinG();
-        double[] linB = getLinB();
-        boolean[] transparent = getTransparent();
-
-        java.util.Arrays.fill(linR, 0.0);
-        java.util.Arrays.fill(linG, 0.0);
-        java.util.Arrays.fill(linB, 0.0);
-        java.util.Arrays.fill(transparent, false);
-
-        for (int i = 0; i < MAP_SIZE; i++) {
+        for (int i = 0; i < size; i++) {
             int rgb = pixels[i];
             if (((rgb >> 24) & 0xFF) < 128) {
                 transparent[i] = true;
@@ -328,14 +253,9 @@ public final class EmageCore {
             linB[i] = EmageColors.linearize(rgb & 0xFF);
         }
 
-        for (int y = 0; y < MAP_WIDTH; y++) {
-            boolean leftToRight = (y % 2 == 0);
-            int startX = leftToRight ? 0 : MAP_WIDTH - 1;
-            int endX = leftToRight ? MAP_WIDTH : -1;
-            int stepX = leftToRight ? 1 : -1;
-
-            for (int x = startX; x != endX; x += stepX) {
-                int idx = y * MAP_WIDTH + x;
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int idx = y * width + x;
 
                 if (transparent[idx]) {
                     result[idx] = 0;
@@ -354,119 +274,37 @@ public final class EmageCore {
                 result[idx] = match;
 
                 double[] palLin = EmageColors.getLinearRGB(match);
-                double eR = clampedR - palLin[0];
-                double eG = clampedG - palLin[1];
-                double eB = clampedB - palLin[2];
+                calculateConstrainedError(errOut, clampedR, clampedG, clampedB, palLin[0], palLin[1], palLin[2]);
+                double eR = errOut[0];
+                double eG = errOut[1];
+                double eB = errOut[2];
 
-                int nextX = x + stepX;
-                int prevX = x - stepX;
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x + 1, y,     eR, eG, eB, 7.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x + 2, y,     eR, eG, eB, 5.0 / 48.0);
 
-                if (nextX >= 0 && nextX < MAP_WIDTH) {
-                    int ni = idx + stepX;
-                    linR[ni] += eR * 7.0 / 16.0;
-                    linG[ni] += eG * 7.0 / 16.0;
-                    linB[ni] += eB * 7.0 / 16.0;
-                }
-                if (y + 1 < MAP_WIDTH) {
-                    int nextRow = (y + 1) * MAP_WIDTH;
-                    if (prevX >= 0 && prevX < MAP_WIDTH) {
-                        int ni = nextRow + prevX;
-                        linR[ni] += eR * 3.0 / 16.0;
-                        linG[ni] += eG * 3.0 / 16.0;
-                        linB[ni] += eB * 3.0 / 16.0;
-                    }
-                    {
-                        int ni = nextRow + x;
-                        linR[ni] += eR * 5.0 / 16.0;
-                        linG[ni] += eG * 5.0 / 16.0;
-                        linB[ni] += eB * 5.0 / 16.0;
-                    }
-                    if (nextX >= 0 && nextX < MAP_WIDTH) {
-                        int ni = nextRow + nextX;
-                        linR[ni] += eR * 1.0 / 16.0;
-                        linG[ni] += eG * 1.0 / 16.0;
-                        linB[ni] += eB * 1.0 / 16.0;
-                    }
-                }
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x - 2, y + 1, eR, eG, eB, 3.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x - 1, y + 1, eR, eG, eB, 5.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x,     y + 1, eR, eG, eB, 7.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x + 1, y + 1, eR, eG, eB, 5.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x + 2, y + 1, eR, eG, eB, 3.0 / 48.0);
+
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x - 2, y + 2, eR, eG, eB, 1.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x - 1, y + 2, eR, eG, eB, 3.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x,     y + 2, eR, eG, eB, 5.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x + 1, y + 2, eR, eG, eB, 3.0 / 48.0);
+                distributeErrorSafe(linR, linG, linB, transparent, width, height, x + 2, y + 2, eR, eG, eB, 1.0 / 48.0);
             }
         }
 
         return result;
     }
 
-    private static byte[] ditherJarvisGammaCorrected(int[] pixels) {
-        byte[] result = acquireBuffer();
-
-        double[] linR = getLinR();
-        double[] linG = getLinG();
-        double[] linB = getLinB();
-        boolean[] transparent = getTransparent();
-
-        java.util.Arrays.fill(linR, 0.0);
-        java.util.Arrays.fill(linG, 0.0);
-        java.util.Arrays.fill(linB, 0.0);
-        java.util.Arrays.fill(transparent, false);
-
-        for (int i = 0; i < MAP_SIZE; i++) {
-            int rgb = pixels[i];
-            if (((rgb >> 24) & 0xFF) < 128) {
-                transparent[i] = true;
-                continue;
-            }
-            linR[i] = EmageColors.linearize((rgb >> 16) & 0xFF);
-            linG[i] = EmageColors.linearize((rgb >> 8) & 0xFF);
-            linB[i] = EmageColors.linearize(rgb & 0xFF);
-        }
-
-        for (int y = 0; y < MAP_WIDTH; y++) {
-            for (int x = 0; x < MAP_WIDTH; x++) {
-                int idx = y * MAP_WIDTH + x;
-
-                if (transparent[idx]) {
-                    result[idx] = 0;
-                    continue;
-                }
-
-                double clampedR = Math.max(0.0, Math.min(1.0, linR[idx]));
-                double clampedG = Math.max(0.0, Math.min(1.0, linG[idx]));
-                double clampedB = Math.max(0.0, Math.min(1.0, linB[idx]));
-
-                int sr = EmageColors.delinearize(clampedR);
-                int sg = EmageColors.delinearize(clampedG);
-                int sb = EmageColors.delinearize(clampedB);
-
-                byte match = matchColor(sr, sg, sb);
-                result[idx] = match;
-
-                double[] palLin = EmageColors.getLinearRGB(match);
-                double eR = clampedR - palLin[0];
-                double eG = clampedG - palLin[1];
-                double eB = clampedB - palLin[2];
-
-                distributeError(linR, linG, linB, x + 1, y,     eR, eG, eB, 7.0 / 48.0);
-                distributeError(linR, linG, linB, x + 2, y,     eR, eG, eB, 5.0 / 48.0);
-
-                distributeError(linR, linG, linB, x - 2, y + 1, eR, eG, eB, 3.0 / 48.0);
-                distributeError(linR, linG, linB, x - 1, y + 1, eR, eG, eB, 5.0 / 48.0);
-                distributeError(linR, linG, linB, x,     y + 1, eR, eG, eB, 7.0 / 48.0);
-                distributeError(linR, linG, linB, x + 1, y + 1, eR, eG, eB, 5.0 / 48.0);
-                distributeError(linR, linG, linB, x + 2, y + 1, eR, eG, eB, 3.0 / 48.0);
-
-                distributeError(linR, linG, linB, x - 2, y + 2, eR, eG, eB, 1.0 / 48.0);
-                distributeError(linR, linG, linB, x - 1, y + 2, eR, eG, eB, 3.0 / 48.0);
-                distributeError(linR, linG, linB, x,     y + 2, eR, eG, eB, 5.0 / 48.0);
-                distributeError(linR, linG, linB, x + 1, y + 2, eR, eG, eB, 3.0 / 48.0);
-                distributeError(linR, linG, linB, x + 2, y + 2, eR, eG, eB, 1.0 / 48.0);
-            }
-        }
-
-        return result;
-    }
-
-    private static void distributeError(double[] linR, double[] linG, double[] linB,
-                                        int x, int y, double eR, double eG, double eB, double weight) {
-        if (x < 0 || x >= MAP_WIDTH || y < 0 || y >= MAP_WIDTH) return;
-        int idx = y * MAP_WIDTH + x;
+    private static void distributeErrorSafe(double[] linR, double[] linG, double[] linB,
+                                            boolean[] transparent, int width, int height,
+                                            int x, int y, double eR, double eG, double eB, double weight) {
+        if (x < 0 || x >= width || y < 0 || y >= height) return;
+        int idx = y * width + x;
+        if (transparent[idx]) return;
         linR[idx] += eR * weight;
         linG[idx] += eG * weight;
         linB[idx] += eB * weight;
@@ -477,20 +315,13 @@ public final class EmageCore {
         void onProgress(int current, int total, String stage);
     }
 
-    public static GifGridData processGifGrid(URL url, int gridW, int gridH, int maxFrames) throws Exception {
-        return processGifGrid(url, gridW, gridH, maxFrames, Quality.BALANCED, null);
-    }
-
-    public static GifGridData processGifGrid(URL url, int gridW, int gridH, int maxFrames, Quality quality) throws Exception {
-        return processGifGrid(url, gridW, gridH, maxFrames, quality, null);
-    }
-
     @SuppressWarnings("unchecked")
-    public static GifGridData processGifGrid(URL url, int gridW, int gridH, int maxFrames, Quality quality, ProgressCallback progress) throws Exception {
-        int totalW = gridW * MAP_WIDTH;
-        int totalH = gridH * MAP_WIDTH;
+    public static GifGridData processGifGrid(URL url, int gridW, int gridH, int maxFrames, ProgressCallback progress) throws Exception {
 
-        GifData gifData = readGif(url, maxFrames);
+        int targetAspectW = gridW * MAP_WIDTH;
+        int targetAspectH = gridH * MAP_WIDTH;
+
+        GifData gifData = readGif(url, maxFrames, targetAspectW, targetAspectH);
         if (gifData.frames.isEmpty()) {
             throw new Exception("No frames found in GIF");
         }
@@ -504,70 +335,61 @@ public final class EmageCore {
             }
         }
 
-        int[] allPixels = new int[totalW * totalH];
+        byte[][][][] gridArr = new byte[gridW][gridH][frameCount][];
 
-        int[][][] prevChunkPixels = new int[gridW][gridH][];
-        byte[][][] prevChunkResults = new byte[gridW][gridH][];
+        class DitherState {
+            int[] prevPixels = null;
+            byte[] prevDither = null;
+        }
+        final DitherState state = new DitherState();
+
+        CompletableFuture<Void> pipeline = CompletableFuture.completedFuture(null);
 
         for (int f = 0; f < frameCount; f++) {
-            BufferedImage frame = gifData.frames.get(f);
-            int srcW = frame.getWidth();
-            int srcH = frame.getHeight();
-
             final int frameIdx = f;
+            BufferedImage frame = gifData.frames.get(f);
 
-            List<Future<?>> tasks = new ArrayList<>(gridW * gridH);
-            for (int gy = 0; gy < gridH; gy++) {
-                for (int gx = 0; gx < gridW; gx++) {
-                    final int cx = gx, cy = gy;
+            pipeline = pipeline.thenRunAsync(() -> {
+                int[] fullPixels = new int[targetAspectW * targetAspectH];
+                frame.getRGB(0, 0, targetAspectW, targetAspectH, fullPixels, 0, targetAspectW);
 
-                    final int srcX = cx * srcW / gridW;
-                    final int srcY = cy * srcH / gridH;
-                    final int srcChunkW = (cx + 1) * srcW / gridW - srcX;
-                    final int srcChunkH = (cy + 1) * srcH / gridH - srcY;
-
-                    tasks.add(EXECUTOR.submit(() -> {
-                        BufferedImage chunk;
-                        if (srcChunkW > 0 && srcChunkH > 0) {
-                            BufferedImage sub = frame.getSubimage(srcX, srcY, srcChunkW, srcChunkH);
-                            chunk = resize(sub, MAP_WIDTH, MAP_WIDTH);
-                        } else {
-                            chunk = new BufferedImage(MAP_WIDTH, MAP_WIDTH, BufferedImage.TYPE_INT_ARGB);
-                        }
-
-                        int[] chunkPx = new int[MAP_SIZE];
-                        chunk.getRGB(0, 0, MAP_WIDTH, MAP_WIDTH, chunkPx, 0, MAP_WIDTH);
-
-                        byte[] dithered;
-                        if (frameIdx > 0 && prevChunkPixels[cx][cy] != null) {
-                            dithered = ditherPixelsStable(chunkPx, prevChunkPixels[cx][cy],
-                                    prevChunkResults[cx][cy], quality);
-                        } else {
-                            dithered = ditherPixels(chunkPx, quality);
-                        }
-
-                        synchronized (grid[cx][cy]) {
-                            grid[cx][cy].add(dithered);
-                        }
-
-                        if (prevChunkPixels[cx][cy] == null) {
-                            prevChunkPixels[cx][cy] = new int[MAP_SIZE];
-                        }
-                        System.arraycopy(chunkPx, 0, prevChunkPixels[cx][cy], 0, MAP_SIZE);
-                        prevChunkResults[cx][cy] = dithered;
-                    }));
+                byte[] fullDither;
+                if (frameIdx > 0 && state.prevPixels != null) {
+                    fullDither = ditherPixelsStable(fullPixels, targetAspectW, targetAspectH, state.prevPixels, state.prevDither);
+                } else {
+                    fullDither = ditherPixels(fullPixels, targetAspectW, targetAspectH);
                 }
-            }
 
-            for (Future<?> task : tasks) {
-                task.get();
-            }
+                state.prevPixels = fullPixels;
+                state.prevDither = fullDither;
 
-            gifData.frames.set(f, null);
+                for (int gy = 0; gy < gridH; gy++) {
+                    for (int gx = 0; gx < gridW; gx++) {
+                        byte[] chunk = new byte[MAP_SIZE];
+                        for (int cy = 0; cy < MAP_WIDTH; cy++) {
+                            int srcY = gy * MAP_WIDTH + cy;
+                            int srcX = gx * MAP_WIDTH;
+                            System.arraycopy(fullDither, srcY * targetAspectW + srcX, chunk, cy * MAP_WIDTH, MAP_WIDTH);
+                        }
+                        gridArr[gx][gy][frameIdx] = chunk;
+                    }
+                }
 
-            if (progress != null && (f % 10 == 0 || f == frameCount - 1)) {
-                int pct = (int) ((f + 1) * 100.0 / frameCount);
-                progress.onProgress(f + 1, frameCount, "Dithering frame " + (f + 1) + "/" + frameCount + " (" + pct + "%)");
+                gifData.frames.set(frameIdx, null);
+                if (progress != null && (frameIdx % 10 == 0 || frameIdx == frameCount - 1)) {
+                    int pct = (int) ((frameIdx + 1) * 100.0 / frameCount);
+                    progress.onProgress(frameIdx + 1, frameCount, "Dithering frame " + (frameIdx + 1) + "/" + frameCount + " (" + pct + "%)");
+                }
+            }, getExecutor());
+        }
+
+        pipeline.join();
+
+        for (int gx = 0; gx < gridW; gx++) {
+            for (int gy = 0; gy < gridH; gy++) {
+                for (int f = 0; f < frameCount; f++) {
+                    grid[gx][gy].add(gridArr[gx][gy][f]);
+                }
             }
         }
 
@@ -578,6 +400,7 @@ public final class EmageCore {
     }
 
     private static InputStream openLimitedStream(URL url) throws IOException {
+        resolveAndValidate(url.getHost());
         return openLimitedStream(url, getMaxRedirects());
     }
 
@@ -590,8 +413,6 @@ public final class EmageCore {
             throw new IOException("Too many redirects");
         }
 
-        resolveAndValidate(url.getHost());
-
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setInstanceFollowRedirects(false);
         conn.setRequestMethod("GET");
@@ -600,41 +421,45 @@ public final class EmageCore {
         conn.setRequestProperty("User-Agent", "Mozilla/5.0 Emage-Plugin");
         conn.setRequestProperty("Host", url.getHost());
 
-        conn.connect();
+        try {
+            conn.connect();
 
-        resolveAndValidate(url.getHost());
-
-        int status = conn.getResponseCode();
-        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
-            String redirect = conn.getHeaderField("Location");
-            conn.disconnect();
-            if (redirect != null) {
-                URL redirectUrl = new URL(url, redirect);
-                resolveAndValidate(redirectUrl.getHost());
-                return openLimitedStream(redirectUrl, remainingRedirects - 1);
+            int status = conn.getResponseCode();
+            if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+                String redirect = conn.getHeaderField("Location");
+                conn.disconnect();
+                if (redirect != null) {
+                    URL redirectUrl = new URL(url, redirect);
+                    resolveAndValidate(redirectUrl.getHost());
+                    return openLimitedStream(redirectUrl, remainingRedirects - 1);
+                }
+                throw new IOException("Redirect without Location header");
             }
-            throw new IOException("Redirect without Location header");
-        }
 
-        if (status != 200) {
+            if (status != 200) {
+                conn.disconnect();
+                throw new IOException("HTTP error: " + status);
+            }
+
+            long maxBytes = getMaxDownloadBytes();
+            long contentLength = conn.getContentLengthLong();
+            if (contentLength > maxBytes) {
+                conn.disconnect();
+                throw new IOException("File too large: " + contentLength + " bytes (max " + maxBytes + ")");
+            }
+
+            return new LimitedInputStream(conn.getInputStream(), maxBytes, conn);
+
+        } catch (IOException ex) {
             conn.disconnect();
-            throw new IOException("HTTP error: " + status);
+            throw ex;
         }
-
-        long maxBytes = getMaxDownloadBytes();
-        long contentLength = conn.getContentLengthLong();
-        if (contentLength > maxBytes) {
-            conn.disconnect();
-            throw new IOException("File too large: " + contentLength + " bytes (max " + maxBytes + ")");
-        }
-
-        return new LimitedInputStream(conn.getInputStream(), maxBytes);
     }
 
     private static java.net.InetAddress resolveAndValidate(String host) throws IOException {
         java.net.InetAddress address;
         try {
-            Future<java.net.InetAddress> dnsFuture = EXECUTOR.submit(
+            Future<java.net.InetAddress> dnsFuture = getExecutor().submit(
                     () -> java.net.InetAddress.getByName(host));
             address = dnsFuture.get(5, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
@@ -684,11 +509,13 @@ public final class EmageCore {
     private static class LimitedInputStream extends FilterInputStream {
         private long remaining;
         private final long limit;
+        private final HttpURLConnection connection;
 
-        LimitedInputStream(InputStream in, long limit) {
+        LimitedInputStream(InputStream in, long limit, HttpURLConnection connection) {
             super(in);
             this.remaining = limit;
             this.limit = limit;
+            this.connection = connection;
         }
 
         @Override
@@ -707,9 +534,52 @@ public final class EmageCore {
             if (read > 0) remaining -= read;
             return read;
         }
+
+        @Override
+        public void close() throws IOException {
+            super.close();
+            if (connection != null) connection.disconnect();
+        }
     }
 
-    private static GifData readGif(URL url, int maxFrames) throws Exception {
+    public static BufferedImage padAndScaleToExact(BufferedImage src, int targetW, int targetH) {
+        int srcW = src.getWidth();
+        int srcH = src.getHeight();
+
+        double targetRatio = (double) targetW / targetH;
+        double srcRatio = (double) srcW / srcH;
+
+        int drawW = targetW;
+        int drawH = targetH;
+        int offsetX = 0;
+        int offsetY = 0;
+
+        if (Math.abs(targetRatio - srcRatio) > 0.001) {
+            if (srcRatio > targetRatio) {
+                drawH = (int) Math.round(targetW / srcRatio);
+                offsetY = (targetH - drawH) / 2;
+            } else {
+                drawW = (int) Math.round(targetH * srcRatio);
+                offsetX = (targetW - drawW) / 2;
+            }
+        }
+
+        BufferedImage padded = new BufferedImage(targetW, targetH, BufferedImage.TYPE_INT_ARGB);
+        Graphics2D g = padded.createGraphics();
+
+        g.setColor(new java.awt.Color(0, 0, 0, 255));
+        g.fillRect(0, 0, targetW, targetH);
+
+        g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
+
+        g.drawImage(src, offsetX, offsetY, drawW, drawH, null);
+        g.dispose();
+
+        return padded;
+    }
+
+    private static GifData readGif(URL url, int maxFrames, int targetAspectW, int targetAspectH) throws Exception {
         List<BufferedImage> frames = new ArrayList<>();
         List<Integer> delays = new ArrayList<>();
 
@@ -735,30 +605,6 @@ public final class EmageCore {
             int canvasWidth = 0;
             int canvasHeight = 0;
 
-            try {
-                IIOMetadata streamMeta = reader.getStreamMetadata();
-                if (streamMeta != null) {
-                    IIOMetadataNode root = (IIOMetadataNode) streamMeta.getAsTree(
-                            streamMeta.getNativeMetadataFormatName());
-                    NodeList lsdNodes = root.getElementsByTagName("LogicalScreenDescriptor");
-                    if (lsdNodes.getLength() > 0) {
-                        IIOMetadataNode lsd = (IIOMetadataNode) lsdNodes.item(0);
-                        String w = lsd.getAttribute("logicalScreenWidth");
-                        String h = lsd.getAttribute("logicalScreenHeight");
-                        if (w != null && !w.isEmpty()) canvasWidth = Integer.parseInt(w);
-                        if (h != null && !h.isEmpty()) canvasHeight = Integer.parseInt(h);
-                    }
-                }
-            } catch (Exception e) {
-                logger.log(Level.FINE, "Could not read GIF logical screen descriptor", e);
-            }
-
-            if (canvasWidth > 4096 || canvasHeight > 4096) {
-                reader.dispose();
-                throw new Exception("GIF dimensions too large: " + canvasWidth + "x" + canvasHeight +
-                        " (max 4096x4096)");
-            }
-
             Color gifBackgroundColor = null;
             try {
                 IIOMetadata streamMeta = reader.getStreamMetadata();
@@ -770,6 +616,12 @@ public final class EmageCore {
                     int bgColorIndex = 0;
                     if (lsdNodes.getLength() > 0) {
                         IIOMetadataNode lsd = (IIOMetadataNode) lsdNodes.item(0);
+
+                        String w = lsd.getAttribute("logicalScreenWidth");
+                        String h = lsd.getAttribute("logicalScreenHeight");
+                        if (w != null && !w.isEmpty()) canvasWidth = Integer.parseInt(w);
+                        if (h != null && !h.isEmpty()) canvasHeight = Integer.parseInt(h);
+
                         String bgIdx = lsd.getAttribute("backgroundColorIndex");
                         if (bgIdx != null && !bgIdx.isEmpty()) {
                             bgColorIndex = Integer.parseInt(bgIdx);
@@ -793,14 +645,22 @@ public final class EmageCore {
                         }
                     }
                 }
-            } catch (Exception e) {
-                logger.log(Level.FINE, "Could not read GIF background color", e);
+            } catch (NumberFormatException e) {
+                logger.log(Level.FINE, "Could not parse GIF metadata values: " + e.getMessage());
+            } catch (RuntimeException e) {
+                logger.log(Level.WARNING, "Could not read GIF stream metadata. The animation may render incorrectly.", e);
             }
 
             BufferedImage firstFrame = reader.read(0);
             if (canvasWidth <= 0 || canvasHeight <= 0) {
                 canvasWidth = firstFrame.getWidth();
                 canvasHeight = firstFrame.getHeight();
+            }
+
+            if (canvasWidth > 4096 || canvasHeight > 4096) {
+                reader.dispose();
+                throw new Exception("GIF dimensions too large: " + canvasWidth + "x" + canvasHeight +
+                        " (max 4096x4096)");
             }
 
             long canvasBytes = (long) canvasWidth * canvasHeight * 4;
@@ -819,21 +679,24 @@ public final class EmageCore {
 
             final Color finalBgColor = gifBackgroundColor;
 
+            long scaledFrameBytes = (long) targetAspectW * targetAspectH * 4;
+
             for (int i = 0; i < numFrames; i++) {
                 BufferedImage rawFrame;
                 try {
                     rawFrame = (i == 0) ? firstFrame : reader.read(i);
+                } catch (IndexOutOfBoundsException | IIOException e) {
+                    logger.warning("Could not read GIF frame " + i + ". Skipping frame. Cause: " + e.getMessage());
+                    continue;
                 } catch (Exception e) {
-                    logger.log(Level.FINE, "Failed to read GIF frame " + i, e);
-                    break;
+                    logger.warning("Unexpected error decoding frame " + i + ". Skipping frame. Cause: " + e.getMessage());
+                    continue;
                 }
-                if (rawFrame == null) break;
+                if (rawFrame == null) continue;
 
-                long frameBytes = (long) rawFrame.getWidth() * rawFrame.getHeight() * 4;
-                totalDecodedBytes += frameBytes + canvasBytes; // frame + canvas copy
+                totalDecodedBytes += scaledFrameBytes;
                 if (totalDecodedBytes > maxDecodedBytes) {
-                    logger.warning("GIF exceeded decoded memory limit at frame " + i +
-                            " (" + (totalDecodedBytes / 1024 / 1024) + "MB). Truncating.");
+                    logger.warning("GIF exceeded the decoded memory limit at frame " + i + ". The animation was truncated to prevent out-of-memory errors.");
                     break;
                 }
 
@@ -871,7 +734,7 @@ public final class EmageCore {
                         }
                     }
                 } catch (Exception e) {
-                    logger.log(Level.FINE, "Failed to read metadata for GIF frame " + i, e);
+                    logger.warning("Could not read metadata for GIF frame " + i + ". Delay and disposal methods will fall back to defaults. Cause: " + e.getMessage());
                 }
 
                 if ("restoreToPrevious".equalsIgnoreCase(disposal)) {
@@ -880,7 +743,7 @@ public final class EmageCore {
 
                 canvasG.drawImage(rawFrame, frameX, frameY, null);
 
-                frames.add(copyImage(canvas));
+                frames.add(padAndScaleToExact(canvas, targetAspectW, targetAspectH));
                 delays.add(Math.max(20, delay));
 
                 if ("restoreToBackgroundColor".equalsIgnoreCase(disposal)) {
@@ -912,42 +775,6 @@ public final class EmageCore {
         return new GifData(frames, delays);
     }
 
-    private static double[] getLinR() {
-        double[] arr = TL_LIN_R.get();
-        if (arr == null) {
-            arr = new double[MAP_SIZE];
-            TL_LIN_R.set(arr);
-        }
-        return arr;
-    }
-
-    private static double[] getLinG() {
-        double[] arr = TL_LIN_G.get();
-        if (arr == null) {
-            arr = new double[MAP_SIZE];
-            TL_LIN_G.set(arr);
-        }
-        return arr;
-    }
-
-    private static double[] getLinB() {
-        double[] arr = TL_LIN_B.get();
-        if (arr == null) {
-            arr = new double[MAP_SIZE];
-            TL_LIN_B.set(arr);
-        }
-        return arr;
-    }
-
-    private static boolean[] getTransparent() {
-        boolean[] arr = TL_TRANSPARENT.get();
-        if (arr == null) {
-            arr = new boolean[MAP_SIZE];
-            TL_TRANSPARENT.set(arr);
-        }
-        return arr;
-    }
-
     private static BufferedImage copyImage(BufferedImage src) {
         BufferedImage copy = new BufferedImage(src.getWidth(), src.getHeight(), BufferedImage.TYPE_INT_ARGB);
         Graphics2D g = copy.createGraphics();
@@ -956,48 +783,9 @@ public final class EmageCore {
         return copy;
     }
 
-    public static byte[] compressMap(byte[] data) {
-        return EmageCompression.compressSingleStatic(data);
-    }
-
-    public static byte[] decompressMap(byte[] compressed) {
-        return EmageCompression.decompressSingleStatic(compressed);
-    }
-
-    public static AnimData decompressAnim(byte[] data) {
-        try {
-            EmageCompression.AnimGridData grid = EmageCompression.decompressAnimGrid(data);
-            if (grid != null && !grid.cells.isEmpty()) {
-                List<byte[]> frames = grid.cells.values().iterator().next();
-                int avg = grid.delays.isEmpty() ? 100 :
-                        (int) grid.delays.stream().mapToInt(i -> i).average().orElse(100);
-                return new AnimData(frames, grid.delays, avg, grid.syncId);
-            }
-        } catch (Exception e) {
-            logger.log(Level.FINE, "Failed to decompress animation data via grid format", e);
-        }
-
-        try {
-            byte[] mapData = EmageCompression.decompressSingleStatic(data);
-            if (mapData != null && mapData.length == MAP_SIZE) {
-                List<byte[]> frames = new ArrayList<>();
-                frames.add(mapData);
-                List<Integer> delays = new ArrayList<>();
-                delays.add(100);
-                return new AnimData(frames, delays, 100, 0L);
-            }
-        } catch (Exception e) {
-            logger.log(Level.FINE, "Failed to decompress animation as static fallback", e);
-        }
-
-        List<byte[]> frames = new ArrayList<>();
-        frames.add(new byte[MAP_SIZE]);
-        List<Integer> delays = new ArrayList<>();
-        delays.add(100);
-        return new AnimData(frames, delays, 100, 0L);
-    }
-
     public static void shutdown() {
+        if (EXECUTOR == null || EXECUTOR.isShutdown()) return;
+
         EXECUTOR.shutdown();
         try {
             if (!EXECUTOR.awaitTermination(5, TimeUnit.SECONDS)) {
@@ -1008,12 +796,7 @@ public final class EmageCore {
             Thread.currentThread().interrupt();
         }
 
-        TL_LIN_R.remove();
-        TL_LIN_G.remove();
-        TL_LIN_B.remove();
-        TL_TRANSPARENT.remove();
-
-        clearAllPools();
+        EXECUTOR = null;
     }
 
     public static BufferedImage downloadImage(URL url) throws Exception {
@@ -1033,20 +816,6 @@ public final class EmageCore {
         GifData(List<BufferedImage> frames, List<Integer> delays) {
             this.frames = frames;
             this.delays = delays;
-        }
-    }
-
-    public static class AnimData {
-        public final List<byte[]> frames;
-        public final List<Integer> delays;
-        public final int avgDelay;
-        public final long syncId;
-
-        public AnimData(List<byte[]> frames, List<Integer> delays, int avgDelay, long syncId) {
-            this.frames = frames;
-            this.delays = delays;
-            this.avgDelay = avgDelay;
-            this.syncId = syncId;
         }
     }
 

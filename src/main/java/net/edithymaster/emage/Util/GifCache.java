@@ -6,8 +6,8 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.lang.ref.SoftReference;
 
 public final class GifCache {
 
@@ -43,12 +43,12 @@ public final class GifCache {
     }
 
     private static class CacheEntry {
-        final EmageCore.GifGridData data;
+        final SoftReference<EmageCore.GifGridData> dataRef;
         final long sizeBytes;
         volatile long lastAccessed;
 
         CacheEntry(EmageCore.GifGridData data) {
-            this.data = data;
+            this.dataRef = new SoftReference<>(data);
             this.lastAccessed = System.currentTimeMillis();
             this.sizeBytes = calculateSize(data);
         }
@@ -73,18 +73,18 @@ public final class GifCache {
         }
     }
 
-    public static String createKey(String url, int gridWidth, int gridHeight, EmageCore.Quality quality) {
-        String input = url + "|" + gridWidth + "x" + gridHeight + "|" + quality.name();
+    public static String createKey(String url, int gridWidth, int gridHeight) {
+        String input = url + "|" + gridWidth + "x" + gridHeight;
+
         try {
-            MessageDigest md = MessageDigest.getInstance("MD5");
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] hash = md.digest(input.getBytes());
-            StringBuilder sb = new StringBuilder(32);
+            StringBuilder sb = new StringBuilder(64);
             for (byte b : hash) {
                 sb.append(String.format("%02x", b));
             }
             return sb.toString();
         } catch (NoSuchAlgorithmException e) {
-            if (logger != null) logger.log(Level.WARNING, "MD5 not available, using hashCode", e);
             return String.valueOf(input.hashCode());
         }
     }
@@ -100,7 +100,8 @@ public final class GifCache {
             return null;
         }
 
-        if (entry.isExpired()) {
+        EmageCore.GifGridData data = entry.dataRef.get();
+        if (data == null || entry.isExpired()) {
             synchronized (CACHE) {
                 CACHE.remove(key);
             }
@@ -111,7 +112,7 @@ public final class GifCache {
 
         entry.lastAccessed = System.currentTimeMillis();
         hits.incrementAndGet();
-        return entry.data;
+        return data;
     }
 
     public static void put(String key, EmageCore.GifGridData data) {
@@ -135,8 +136,9 @@ public final class GifCache {
         Iterator<Map.Entry<String, CacheEntry>> it = CACHE.entrySet().iterator();
         while (it.hasNext()) {
             Map.Entry<String, CacheEntry> e = it.next();
-            if (now - e.getValue().lastAccessed > expireTimeMs) {
-                totalSizeBytes.addAndGet(-e.getValue().sizeBytes);
+            CacheEntry entry = e.getValue();
+            if (now - entry.lastAccessed > expireTimeMs || entry.dataRef.get() == null) {
+                totalSizeBytes.addAndGet(-entry.sizeBytes);
                 it.remove();
             }
         }

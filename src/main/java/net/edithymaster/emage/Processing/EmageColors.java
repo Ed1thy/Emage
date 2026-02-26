@@ -1,14 +1,22 @@
 package net.edithymaster.emage.Processing;
 
 import org.bukkit.Bukkit;
+import org.bukkit.map.MapPalette;
 
 import java.awt.Color;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public final class EmageColors {
 
     private EmageColors() {}
 
-    private static final int MAX_VALID_INDEX = detectMaxValidIndex();
+    private static final Logger logger = Logger.getLogger(EmageColors.class.getName());
+
+    private static volatile int maxValidIndex = 208;
 
     private static final int[][] PALETTE = {
             {0, 0, 0}, {0, 0, 0}, {0, 0, 0}, {0, 0, 0},
@@ -86,9 +94,8 @@ public final class EmageColors {
 
     private static final Color[] COLORS = new Color[256];
 
-    private static final int CACHE_BITS = 7;
+    private static final int CACHE_BITS = 8;
     private static final int CACHE_SIZE = 1 << (CACHE_BITS * 3);
-    private static final int CACHE_SHIFT = 8 - CACHE_BITS;
     private static final byte[] CACHE = new byte[CACHE_SIZE];
     private static volatile boolean initialized = false;
 
@@ -137,21 +144,53 @@ public final class EmageColors {
         }
     }
 
-    private static int detectMaxValidIndex() {
+    @SuppressWarnings("deprecation")
+    public static void syncWithServer() {
         try {
-            String version = Bukkit.getBukkitVersion();
-            String[] parts = version.split("[.-]");
-            int major = Integer.parseInt(parts[0]);
-            int minor = Integer.parseInt(parts[1]);
-
-            if (major > 1 || (major == 1 && minor >= 17)) {
-                return 236;
+            int synced = 0;
+            int highestFound = 4;
+            for (int i = 4; i < 256; i++) {
+                try {
+                    Color serverColor = MapPalette.getColor((byte) i);
+                    if (serverColor != null) {
+                        PALETTE[i][0] = serverColor.getRed();
+                        PALETTE[i][1] = serverColor.getGreen();
+                        PALETTE[i][2] = serverColor.getBlue();
+                        synced++;
+                        highestFound = i;
+                    }
+                } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
+                    break;
+                }
             }
-            return 208;
+            maxValidIndex = Math.min(256, highestFound + 1);
+
+            if (synced > 0) {
+                recalculateDerivedData();
+                if (initialized) {
+                    synchronized (CACHE) {
+                        initialized = false;
+                    }
+                }
+                logger.info("Synced map color palette with the server.");
+            }
         } catch (Exception e) {
-            return 208;
+            logger.warning("Could not sync map color palette with the server. Falling back to built-in colors.");
         }
     }
+
+    private static void recalculateDerivedData() {
+        for (int i = 0; i < 256; i++) {
+            int[] rgb = PALETTE[i];
+            COLORS[i] = new Color(rgb[0], rgb[1], rgb[2]);
+            PALETTE_LINEAR_RGB[i][0] = LINEAR_TABLE[rgb[0]];
+            PALETTE_LINEAR_RGB[i][1] = LINEAR_TABLE[rgb[1]];
+            PALETTE_LINEAR_RGB[i][2] = LINEAR_TABLE[rgb[2]];
+            PALETTE_LAB[i] = rgbToLab(rgb[0], rgb[1], rgb[2]);
+        }
+    }
+
+    static void detectAndSetMaxValidIndex() {}
 
     public static void initCache() {
         if (initialized) return;
@@ -159,23 +198,7 @@ public final class EmageColors {
         synchronized (CACHE) {
             if (initialized) return;
 
-            int bits = CACHE_BITS;
-            int total = 1 << bits;
-            int shift = CACHE_SHIFT;
-
-            java.util.stream.IntStream.range(0, total).parallel().forEach(r -> {
-                for (int g = 0; g < total; g++) {
-                    for (int b = 0; b < total; b++) {
-                        int r8 = (r << shift) | (r >> (bits - shift));
-                        int g8 = (g << shift) | (g >> (bits - shift));
-                        int b8 = (b << shift) | (b >> (bits - shift));
-
-                        int index = (r << (bits * 2)) | (g << bits) | b;
-                        CACHE[index] = findClosestColorLab(r8, g8, b8);
-                    }
-                }
-            });
-
+            buildCacheInternal();
             initialized = true;
         }
     }
@@ -186,10 +209,7 @@ public final class EmageColors {
         b = Math.max(0, Math.min(255, b));
 
         if (initialized) {
-            int index = ((r >> CACHE_SHIFT) << (CACHE_BITS * 2))
-                    | ((g >> CACHE_SHIFT) << CACHE_BITS)
-                    | (b >> CACHE_SHIFT);
-            return CACHE[index];
+            return CACHE[(r << 16) | (g << 8) | b];
         }
 
         return findClosestColorLab(r, g, b);
@@ -201,7 +221,7 @@ public final class EmageColors {
 
         double bestLabEuc = Double.MAX_VALUE;
 
-        for (int i = 4; i < MAX_VALID_INDEX; i++) {
+        for (int i = 4; i < maxValidIndex; i++) {
             double dL = L - PALETTE_LAB[i][0];
             double da = a - PALETTE_LAB[i][1];
             double db = bv - PALETTE_LAB[i][2];
@@ -209,12 +229,12 @@ public final class EmageColors {
             if (d < bestLabEuc) bestLabEuc = d;
         }
 
-        double threshold = bestLabEuc * 3.0 + 100.0;
+        double threshold = bestLabEuc * 1.5 + 25.0;
 
         int bestIndex = 4;
         double bestDistance = Double.MAX_VALUE;
 
-        for (int i = 4; i < MAX_VALID_INDEX; i++) {
+        for (int i = 4; i < maxValidIndex; i++) {
             double dL = L - PALETTE_LAB[i][0];
             double da = a - PALETTE_LAB[i][1];
             double db = bv - PALETTE_LAB[i][2];
@@ -343,6 +363,43 @@ public final class EmageColors {
         }
     }
 
+    public static void forceRebuildCache() {
+        synchronized (CACHE) {
+            initialized = false;
+            logger.info("Rebuilding color mapping cache...");
+
+            buildCacheInternal();
+
+            initialized = true;
+            logger.info("Rebuilt the color mapping cache.");
+        }
+    }
+
+    private static void buildCacheInternal() {
+        int processors = Runtime.getRuntime().availableProcessors();
+        int chunkSize = 256 / processors;
+        List<CompletableFuture<Void>> futures = new ArrayList<>();
+
+        for (int i = 0; i < processors; i++) {
+            final int startR = i * chunkSize;
+            final int endR = (i == processors - 1) ? 256 : startR + chunkSize;
+
+            futures.add(CompletableFuture.runAsync(() -> {
+                for (int r = startR; r < endR; r++) {
+                    int baseIndex = r << 16;
+                    for (int g = 0; g < 256; g++) {
+                        int gOffset = g << 8;
+                        for (int b = 0; b < 256; b++) {
+                            CACHE[baseIndex | gOffset | b] = findClosestColorLab(r, g, b);
+                        }
+                    }
+                }
+            }, EmageCore.getExecutor()));
+        }
+
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+    }
+
     public static double linearize(int srgb) {
         return LINEAR_TABLE[Math.max(0, Math.min(255, srgb))];
     }
@@ -355,15 +412,6 @@ public final class EmageColors {
 
     public static double[] getLinearRGB(byte index) {
         return PALETTE_LINEAR_RGB[index & 0xFF];
-    }
-
-    public static Color getColor(byte index) {
-        return COLORS[index & 0xFF];
-    }
-
-    public static int[] getRGB(byte index) {
-        int[] rgb = PALETTE[index & 0xFF];
-        return new int[]{rgb[0], rgb[1], rgb[2]};
     }
 
     public static boolean isCacheReady() {

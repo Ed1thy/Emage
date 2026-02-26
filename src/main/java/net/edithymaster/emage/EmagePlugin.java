@@ -1,45 +1,46 @@
 package net.edithymaster.emage;
 
+import com.github.retrooper.packetevents.PacketEvents;
 import org.bstats.bukkit.Metrics;
 import org.bstats.charts.SimplePie;
 import org.bstats.charts.SingleLineChart;
 import org.bukkit.Bukkit;
-import org.bukkit.ChatColor;
+import org.bukkit.event.HandlerList;
 import org.bukkit.plugin.java.JavaPlugin;
 import net.edithymaster.emage.Command.EmageCommand;
+import net.edithymaster.emage.Config.ConfigManager;
 import net.edithymaster.emage.Config.EmageConfig;
 import net.edithymaster.emage.Manager.EmageManager;
+import net.edithymaster.emage.Packet.MapPacketListener;
+import net.edithymaster.emage.Packet.MapPacketSender;
+import net.edithymaster.emage.Packet.DirectMapSender;
 import net.edithymaster.emage.Processing.EmageCore;
 import net.edithymaster.emage.Render.GifRenderer;
 import net.edithymaster.emage.Util.GifCache;
 import net.edithymaster.emage.Util.UpdateChecker;
-
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import net.edithymaster.emage.Util.MessageUtil;
 
 public final class EmagePlugin extends JavaPlugin {
 
     private EmageManager manager;
     private UpdateChecker updateChecker;
     private EmageConfig emageConfig;
-    private final Pattern hexPattern = Pattern.compile("&#([a-fA-F0-9]{6})");
+    private EmageCommand emageCommand;
+    private MapPacketSender mapPacketSender;
 
     @Override
     public void onEnable() {
+        ConfigManager.initialize(this);
+        MessageUtil.init(this);
+
         int pluginID = 29638;
         Metrics metrics = new Metrics(this, pluginID);
 
-        saveDefaultConfig();
-        backfillConfig();
-
-        getLogger().info("Initializing color system...");
-        Bukkit.getScheduler().runTaskAsynchronously(this, () -> {
-            EmageCore.initColorSystem();
-            getLogger().info("Color system initialized.");
-        });
+        getLogger().info("Initializing color palette cache. This may take a few seconds on first run...");
+        EmageCore.initColorSystem();
+        Bukkit.getScheduler().runTaskAsynchronously(this, EmageCore::initColorSystemAsync);
 
         emageConfig = new EmageConfig(this);
-
         EmageCore.setConfig(emageConfig);
 
         GifCache.init(getLogger());
@@ -48,10 +49,15 @@ public final class EmagePlugin extends JavaPlugin {
                 emageConfig.getCacheMaxMemoryBytes(),
                 emageConfig.getCacheExpireMs()
         );
-        GifRenderer.init(this, emageConfig);
+
+        initPacketSender();
+
+        GifRenderer.init(this, emageConfig, mapPacketSender);
 
         manager = new EmageManager(this, emageConfig);
-        Bukkit.getPluginManager().registerEvents(manager, this);
+        Bukkit.getPluginManager().registerEvents(new net.edithymaster.emage.Manager.EmageListener(this, manager), this);
+
+        PacketEvents.getAPI().getEventManager().registerListener(new MapPacketListener(manager));
 
         var cmd = getCommand("emage");
         if (cmd != null) {
@@ -64,37 +70,36 @@ public final class EmagePlugin extends JavaPlugin {
         registerCustomMetrics(metrics);
 
         if (getConfig().getBoolean("check-updates", true)) {
-            Bukkit.getScheduler().runTaskLaterAsynchronously(this, () -> {
-                updateChecker = new UpdateChecker(this, "Ed1thy", "Emage");
-            }, 100L);
+            updateChecker = new UpdateChecker(this, "Ed1thy", "Emage");
         }
 
-        getLogger().info("Emage v" + getDescription().getVersion() + " enabled!");
+        getLogger().info(String.format("Emage v%s is running on %s", getDescription().getVersion(), getServer().getVersion()));
     }
 
-    private void backfillConfig() {
-        boolean changed = false;
-        var config = getConfig();
-        var defaults = config.getDefaults();
-
-        if (defaults != null) {
-            for (String key : defaults.getKeys(true)) {
-                if (!config.isSet(key)) {
-                    config.set(key, defaults.get(key));
-                    changed = true;
-                }
-            }
-        }
-
-        if (changed) {
-            saveConfig();
-            getLogger().info("Added missing config entries from defaults.");
-        }
+    private void initPacketSender() {
+        mapPacketSender = new DirectMapSender();
     }
 
     @Override
     public void onDisable() {
+        HandlerList.unregisterAll(this);
+
         GifRenderer.stop();
+        Bukkit.getScheduler().cancelTasks(this);
+
+        if (updateChecker != null) {
+            updateChecker.shutdown();
+            updateChecker = null;
+        }
+
+        if (emageConfig != null) {
+            emageConfig.shutdown();
+        }
+
+        if (emageCommand != null) {
+            emageCommand.shutdown();
+            emageCommand = null;
+        }
 
         if (manager != null) {
             manager.shutdown();
@@ -103,15 +108,11 @@ public final class EmagePlugin extends JavaPlugin {
         EmageCore.shutdown();
 
         int cached = GifCache.clearCache();
-        if (cached > 0) {
-            getLogger().info("Cleared " + cached + " cached GIFs.");
-        }
-
-        getLogger().info("Emage disabled!");
+        String cacheNote = cached > 0 ? " (Cleared " + cached + " cached items)" : "";
+        getLogger().info("Shut down complete." + cacheNote);
     }
 
     private void registerCustomMetrics(Metrics metrics) {
-
         metrics.addCustomChart(new SingleLineChart("total_maps", () ->
                 manager.getStats().activeMaps
         ));
@@ -134,81 +135,20 @@ public final class EmagePlugin extends JavaPlugin {
             return "100+";
         }));
 
-        metrics.addCustomChart(new SimplePie("dither_quality", () -> {
-            String quality = getConfig().getString("quality.default-dither", "BALANCED");
-            return quality != null ? quality.toUpperCase() : "BALANCED";
-        }));
-
         metrics.addCustomChart(new SimplePie("adaptive_performance", () ->
                 emageConfig.isAdaptivePerformance() ? "Enabled" : "Disabled"
         ));
-    }
-
-    public String getPrefix() {
-        String prefix = getConfig().getString("messages.prefix");
-        if (prefix == null) {
-            prefix = "&#321212&lE&#3E1111&lm&#4A0F0F&la&#560E0E&lg&#620C0C&le &8&l• ";
-        }
-        return colorize(prefix);
-    }
-
-    private String getRawPrefix() {
-        String prefix = getConfig().getString("messages.prefix");
-        if (prefix == null) {
-            prefix = "&#321212&lE&#3E1111&lm&#4A0F0F&la&#560E0E&lg&#620C0C&le &8&l• ";
-        }
-        return prefix;
-    }
-
-    public String msg(String key, String... placeholders) {
-        String message = getConfig().getString("messages." + key);
-        if (message == null) return ChatColor.RED + "Missing message: " + key;
-
-        message = getRawPrefix() + message;
-
-        for (int i = 0; i + 1 < placeholders.length; i += 2) {
-            String value = placeholders[i + 1] != null ? placeholders[i + 1] : "";
-            message = message.replace(placeholders[i], value);
-        }
-
-        return colorize(message);
-    }
-
-    public String msgNoPrefix(String key, String... placeholders) {
-        String message = getConfig().getString("messages." + key);
-        if (message == null) return ChatColor.RED + "Missing message: " + key;
-
-        for (int i = 0; i + 1 < placeholders.length; i += 2) {
-            String value = placeholders[i + 1] != null ? placeholders[i + 1] : "";
-            message = message.replace(placeholders[i], value);
-        }
-
-        return colorize(message);
-    }
-
-    public String colorize(String message) {
-        Matcher matcher = hexPattern.matcher(message);
-        StringBuffer buffer = new StringBuffer();
-        while (matcher.find()) {
-            try {
-                String hex = matcher.group(1);
-                matcher.appendReplacement(buffer, net.md_5.bungee.api.ChatColor.of("#" + hex).toString());
-            } catch (Exception ignored) {}
-        }
-        matcher.appendTail(buffer);
-
-        return ChatColor.translateAlternateColorCodes('&', buffer.toString());
     }
 
     public UpdateChecker getUpdateChecker() {
         return updateChecker;
     }
 
-    public EmageManager getManager() {
-        return manager;
-    }
-
     public EmageConfig getEmageConfig() {
         return emageConfig;
+    }
+
+    public MapPacketSender getMapPacketSender() {
+        return mapPacketSender;
     }
 }

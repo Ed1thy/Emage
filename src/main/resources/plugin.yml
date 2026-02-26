@@ -1,9 +1,11 @@
 name: Emage
 version: ${project.version}
 main: net.edithymaster.emage.EmagePlugin
-description: Renders static images and GIFs to item frames with accurate colors and dithering.
+description: A Minecraft plugin that displays images and GIFs on item frames.
 api-version: '1.18'
 authors: [EdithyMaster]
+depend:
+  - packetevents
 
 commands:
   emage:

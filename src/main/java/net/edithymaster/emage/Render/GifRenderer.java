@@ -4,185 +4,167 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
-import org.bukkit.map.MapCanvas;
-import org.bukkit.map.MapRenderer;
-import org.bukkit.map.MapView;
 import org.bukkit.plugin.java.JavaPlugin;
 import net.edithymaster.emage.Config.EmageConfig;
-import net.edithymaster.emage.Processing.EmageCore;
+import net.edithymaster.emage.Packet.MapPacketSender;
 
 import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public final class GifRenderer extends MapRenderer {
+public final class GifRenderer {
 
-    private static final Map<Long, SyncGroup> SYNC_GROUPS = new ConcurrentHashMap<>();
+    public static final Map<Long, SyncGroup> SYNC_GROUPS = new ConcurrentHashMap<>();
     private static final Map<Integer, GifRenderer> RENDERERS = new ConcurrentHashMap<>();
     private static final Map<Integer, Location> MAP_LOCATIONS = new ConcurrentHashMap<>();
+
+    private static final double FOV_COSINE_THRESHOLD = 0.64;
 
     private static volatile boolean running = false;
     private static JavaPlugin plugin;
     private static EmageConfig config;
+    private static MapPacketSender packetSender;
+
+    private static ScheduledExecutorService renderExecutor;
+    private static int playerCacheTaskID = -1;
+
+    private static volatile PlayerSnapshot[] playerSnapshots = new PlayerSnapshot[0];
 
     private static final AtomicInteger ID_COUNTER = new AtomicInteger(0);
+    private static long lastTickTime = 0;
+    private static int tickCounter = 0;
 
     private static final int DEFAULT_RENDER_DISTANCE_SQ = 64 * 64;
 
     private final int id;
+    private final int cachedMapId;
     private final long syncId;
     private final byte[][] frames;
     private final int frameCount;
 
-    private volatile MapView mapView;
-    private volatile int lastRenderedFrame = -1;
-    private volatile boolean needsRender = true;
-    private static long lastTickTime = 0;
+    private final FrameDelta[] computedDeltas;
 
-    private static class SyncGroup {
-        final long syncID;
-        final Set<GifRenderer> renderers = ConcurrentHashMap.newKeySet();
-        final int[] delays;
-        final long totalDuration;
-        final int frameCount;
+    private boolean needsRender = true;
 
-        final long[] cumulativeDelays;
+    private static final class PlayerSnapshot {
+        final UUID playerId;
+        final World world;
+        final double x, y, z;
+        final double eyeHeight;
+        final double pitchRad, yawRad;
+        final Set<Long> visibleSyncGroups;
 
-        volatile long startTime = 0;
-        volatile int currentFrame = 0;
-        volatile boolean active = false;
-
-        SyncGroup(long syncID, List<Integer> delayList) {
-            this.syncID = syncID;
-            this.frameCount = delayList != null ? delayList.size() : 0;
-
-            if (frameCount == 0) {
-                this.delays = new int[0];
-                this.cumulativeDelays = new long[0];
-                this.totalDuration = 1;
-                return;
-            }
-
-            this.delays = new int[frameCount];
-            this.cumulativeDelays = new long[frameCount];
-            long total = 0;
-            for (int i = 0; i < frameCount; i++) {
-                int delay = delayList.get(i);
-                delay = Math.max(20, delay);
-                this.delays[i] = delay;
-                total += delay;
-                this.cumulativeDelays[i] = total;
-            }
-            this.totalDuration = Math.max(1, total);
-        }
-
-        void start() {
-            this.startTime = System.currentTimeMillis();
-            this.currentFrame = 0;
-            this.active = true;
-            markAllDirty();
-        }
-
-        void stop() {
-            this.active = false;
-        }
-
-        boolean tick(long now) {
-            if (!active || frameCount <= 1) return false;
-
-            long elapsed = now - startTime;
-            long cyclePosition = elapsed % totalDuration;
-
-            int targetFrame = findFrame(cyclePosition);
-
-            if (targetFrame != currentFrame) {
-                currentFrame = targetFrame;
-                markAllDirty();
-                return true;
-            }
-
-            return false;
-        }
-
-        private int findFrame(long cyclePosition) {
-            int lo = 0, hi = frameCount - 1;
-            while (lo < hi) {
-                int mid = (lo + hi) >>> 1;
-                if (cumulativeDelays[mid] <= cyclePosition) {
-                    lo = mid + 1;
-                } else {
-                    hi = mid;
-                }
-            }
-
-            return lo;
-        }
-
-        void markAllDirty() {
-            for (GifRenderer renderer : renderers) {
-                renderer.needsRender = true;
-            }
-        }
-
-        int getCurrentFrame() {
-            return active ? currentFrame : 0;
+        PlayerSnapshot(Player player, Set<Long> previousVisibleGroups) {
+            this.playerId = player.getUniqueId();
+            Location loc = player.getLocation();
+            this.world = loc.getWorld();
+            this.x = loc.getX();
+            this.y = loc.getY();
+            this.z = loc.getZ();
+            this.eyeHeight = player.getEyeHeight();
+            this.pitchRad = Math.toRadians(loc.getPitch());
+            this.yawRad = Math.toRadians(loc.getYaw());
+            this.visibleSyncGroups = ConcurrentHashMap.newKeySet(previousVisibleGroups != null ? previousVisibleGroups.size() + 2 : 16);
+            if (previousVisibleGroups != null) this.visibleSyncGroups.addAll(previousVisibleGroups);
         }
     }
 
-    public static void init(JavaPlugin pl, EmageConfig cfg) {
+    private static final Map<UUID, Set<Long>> playerVisibleGroupsCarryOver = new HashMap<>();
+
+    private static class FrameDelta {
+        final int minX, minY, columns, rows;
+        final byte[] data;
+
+        FrameDelta(int minX, int minY, int columns, int rows, byte[] data) {
+            this.minX = minX;
+            this.minY = minY;
+            this.columns = columns;
+            this.rows = rows;
+            this.data = data;
+        }
+    }
+
+    private static final FrameDelta NO_CHANGE = new FrameDelta(0, 0, 0, 0, null);
+
+    public static void init(JavaPlugin pl, EmageConfig cfg, MapPacketSender sender) {
+        if (running) stop();
         plugin = pl;
         config = cfg;
-
-        if (running) return;
+        packetSender = sender;
         running = true;
 
-        Bukkit.getScheduler().runTaskTimer(plugin, GifRenderer::tick, 1L, 2L);
+        playerCacheTaskID = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            Collection<? extends Player> online = Bukkit.getOnlinePlayers();
+
+            if (++tickCounter % 100 == 0) {
+                Set<UUID> onlineIds = new HashSet<>(online.size());
+                for (Player p : online) {
+                    onlineIds.add(p.getUniqueId());
+                }
+                playerVisibleGroupsCarryOver.keySet().retainAll(onlineIds);
+            }
+
+            PlayerSnapshot[] newSnapshots = new PlayerSnapshot[online.size()];
+            int idx = 0;
+            for (Player p : online) {
+                UUID uuid = p.getUniqueId();
+                Set<Long> carry = playerVisibleGroupsCarryOver.computeIfAbsent(uuid, k -> new HashSet<>());
+                newSnapshots[idx++] = new PlayerSnapshot(p, carry);
+            }
+            playerSnapshots = newSnapshots;
+        }, 1L, 1L).getTaskId();
+
+        renderExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "Emage-Render-Thread");
+            t.setPriority(Thread.NORM_PRIORITY - 1);
+            return t;
+        });
+        renderExecutor.scheduleAtFixedRate(GifRenderer::tick, 0, 5, TimeUnit.MILLISECONDS);
     }
 
     public static void stop() {
         running = false;
+        if (playerCacheTaskID != -1) {
+            Bukkit.getScheduler().cancelTask(playerCacheTaskID);
+            playerCacheTaskID = -1;
+        }
+        if (renderExecutor != null) {
+            renderExecutor.shutdownNow();
+            try {
+                renderExecutor.awaitTermination(2, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
         SYNC_GROUPS.clear();
         RENDERERS.clear();
         MAP_LOCATIONS.clear();
-    }
+        playerSnapshots = new PlayerSnapshot[0];
+        playerVisibleGroupsCarryOver.clear();
 
-    private static long lastTickTIme = 0;
-    private static int tickCounter = 0;
+        ID_COUNTER.set(0);
+        lastTickTime = 0;
+        tickCounter = 0;
+        plugin = null;
+    }
 
     private static void tick() {
         if (!running || SYNC_GROUPS.isEmpty()) return;
-        if (Bukkit.getOnlinePlayers().isEmpty()) return;
+        PlayerSnapshot[] snaps = playerSnapshots;
+        if (snaps.length == 0) return;
 
         long now = System.currentTimeMillis();
-
-        int fps = config != null ? config.getAnimationFps() : 30;
-        long minFrameInterval = 1000L / Math.max(1, fps);
-
-        if (now - lastTickTime < minFrameInterval) {
-            return;
-        }
+        int fps = Math.max(1, Math.min(60, config != null ? config.getAnimationFps() : 30));
+        if (now - lastTickTime < 1000L / fps) return;
         lastTickTime = now;
 
-        int updateInterval = config != null ? config.getMapUpdateInterval() : 1;
-        tickCounter++;
-        if (tickCounter < updateInterval) {
-            for (SyncGroup group : SYNC_GROUPS.values()) {
-                group.tick(now);
-            }
-            return;
-        }
-        tickCounter = 0;
-
-        boolean anyChanged = false;
+        boolean triggerUpdate = false;
         for (SyncGroup group : SYNC_GROUPS.values()) {
-            if (group.tick(now)) {
-                anyChanged = true;
-            }
+            if (group.tick(now, snaps.length > 0)) triggerUpdate = true;
         }
 
-        if (anyChanged) {
-            sendMapUpdates();
-        }
+        if (triggerUpdate) sendMapUpdates(snaps);
     }
 
     public static void removeByMapId(int mapId) {
@@ -191,239 +173,239 @@ public final class GifRenderer extends MapRenderer {
             SyncGroup group = SYNC_GROUPS.get(renderer.syncId);
             if (group != null) {
                 group.renderers.remove(renderer);
-                if (group.renderers.isEmpty()) {
-                    SYNC_GROUPS.remove(renderer.syncId);
-                }
+                if (group.renderers.isEmpty()) SYNC_GROUPS.remove(renderer.syncId);
             }
         }
         MAP_LOCATIONS.remove(mapId);
     }
 
-    private static void sendMapUpdates() {
-        Collection<? extends Player> players = Bukkit.getOnlinePlayers();
-        if (players.isEmpty()) return;
+    private static void sendMapUpdates(PlayerSnapshot[] snaps) {
+        if (!running || RENDERERS.isEmpty() || snaps.length == 0) return;
 
-        List<GifRenderer> dirtyRenderers = new ArrayList<>();
+        Map<Long, List<GifRenderer>> dirtyGroups = new HashMap<>();
+
+        int totalDirty = 0;
         for (GifRenderer renderer : RENDERERS.values()) {
-            if (renderer.needsRender && renderer.mapView != null) {
-                dirtyRenderers.add(renderer);
-            }
+            if (!renderer.needsRender) continue;
+            dirtyGroups.computeIfAbsent(renderer.syncId, k -> new ArrayList<>()).add(renderer);
+            totalDirty++;
         }
 
-        if (dirtyRenderers.isEmpty()) return;
+        if (totalDirty == 0) return;
 
         int renderDistSq = config != null ? config.getRenderDistanceSquared() : DEFAULT_RENDER_DISTANCE_SQ;
         int perPlayerBudget = config != null ? config.getMaxPacketsPerTick() : 32;
 
-        int globalBudget = perPlayerBudget * 2;
-        int globalSent = 0;
+        MapPacketSender sender = packetSender;
+        Map<UUID, List<Object>> packetsByPlayer = new HashMap<>();
 
-        for (Player player : players) {
-            if (!player.isOnline()) continue;
-            if (globalSent >= globalBudget) break;
+        for (PlayerSnapshot pData : snaps) {
+            World pWorld = pData.world;
+            if (pWorld == null) continue;
 
-            Location playerLoc = player.getLocation();
-            World playerWorld = player.getWorld();
-            int sent = 0;
+            double pX = pData.x, pY = pData.y, pZ = pData.z;
+            double eyeX = pX, eyeY = pY + pData.eyeHeight, eyeZ = pZ;
 
-            for (int i = 0, size = dirtyRenderers.size(); i < size; i++) {
-                if (sent >= perPlayerBudget) break;
-                if (globalSent >= globalBudget) break;
+            double pitch = pData.pitchRad, yaw = pData.yawRad;
+            double xz = Math.cos(pitch);
+            double dirX = -xz * Math.sin(yaw), dirY = -Math.sin(pitch), dirZ = xz * Math.cos(yaw);
 
-                GifRenderer renderer = dirtyRenderers.get(i);
+            int sentToThisPlayer = 0;
+            List<Object> packetsToSend = new ArrayList<>();
 
-                @SuppressWarnings("deprecation")
-                int mapID = renderer.mapView.getId();
-                Location mapLoc = MAP_LOCATIONS.get(mapID);
+            for (Map.Entry<Long, List<GifRenderer>> entry : dirtyGroups.entrySet()) {
+                List<GifRenderer> groupList = entry.getValue();
+                if (groupList.isEmpty()) continue;
+                if (sentToThisPlayer >= perPlayerBudget) break;
 
-                if (mapLoc != null) {
-                    World mapWorld = mapLoc.getWorld();
-                    if (mapWorld == null || !playerWorld.equals(mapWorld)) continue;
+                boolean groupVisible = false;
+                long syncID = entry.getKey();
 
-                    double dx = playerLoc.getX() - mapLoc.getX();
-                    double dy = playerLoc.getY() - mapLoc.getY();
-                    double dz = playerLoc.getZ() - mapLoc.getZ();
-                    double distSq = dx * dx + dy * dy + dz * dz;
-                    if (distSq > renderDistSq) continue;
+                for (GifRenderer renderer : groupList) {
+                    Location loc = MAP_LOCATIONS.get(renderer.cachedMapId);
+                    if (loc == null || loc.getWorld() != pWorld) continue;
+
+                    double dx = pX - loc.getX(), dy = pY - loc.getY(), dz = pZ - loc.getZ();
+                    if (dx * dx + dy * dy + dz * dz > renderDistSq) continue;
+
+                    double toTargetX = loc.getX() - eyeX;
+                    double toTargetY = loc.getY() - eyeY;
+                    double toTargetZ = loc.getZ() - eyeZ;
+
+                    double distSq = toTargetX * toTargetX + toTargetY * toTargetY + toTargetZ * toTargetZ;
+                    if (distSq >= 1.0) {
+                        double invDist = 1.0 / Math.sqrt(distSq);
+                        double dot = dirX * (toTargetX * invDist) + dirY * (toTargetY * invDist) + dirZ * (toTargetZ * invDist);
+                        if (dot > FOV_COSINE_THRESHOLD) { groupVisible = true; break; }
+                    } else {
+                        groupVisible = true; break;
+                    }
                 }
 
-                try {
-                    player.sendMap(renderer.mapView);
-                    sent++;
-                    globalSent++;
-                } catch (Exception ignored) {}
+                if (groupVisible) {
+                    boolean newlyVisible = pData.visibleSyncGroups.add(syncID);
+                    SyncGroup syncGroup = SYNC_GROUPS.get(syncID);
+                    int frameIndex = (syncGroup != null) ? syncGroup.getCurrentFrame() : 0;
+
+                    for (GifRenderer renderer : groupList) {
+                        if (sentToThisPlayer >= perPlayerBudget) break;
+
+                        int safeIdx = frameIndex;
+                        if (safeIdx < 0 || safeIdx >= renderer.frameCount) safeIdx = 0;
+
+                        Object packet;
+                        if (newlyVisible) {
+                            packet = sender.createPacket(renderer.cachedMapId, renderer.frames[safeIdx]);
+                        } else {
+                            FrameDelta fd = renderer.computedDeltas[safeIdx];
+                            if (fd == null) {
+                                byte[] current = renderer.frames[safeIdx];
+                                byte[] previous = renderer.frames[(safeIdx - 1 + renderer.frameCount) % renderer.frameCount];
+                                fd = renderer.buildDeltaInfo(current, previous);
+                                if (fd == null) fd = NO_CHANGE;
+                                renderer.computedDeltas[safeIdx] = fd;
+                            }
+
+                            if (fd != NO_CHANGE) {
+                                packet = sender.createDeltaPacket(renderer.cachedMapId, fd.minX, fd.minY, fd.columns, fd.rows, fd.data);
+                            } else {
+                                packet = null;
+                            }
+                        }
+
+                        if (packet != null) {
+                            packetsToSend.add(packet);
+                            sentToThisPlayer++;
+                        }
+                    }
+                } else {
+                    pData.visibleSyncGroups.remove(syncID);
+                }
+            }
+
+            if (!packetsToSend.isEmpty()) {
+                packetsByPlayer.put(pData.playerId, packetsToSend);
             }
         }
 
-        for (int i = 0, size = dirtyRenderers.size(); i < size; i++) {
-            dirtyRenderers.get(i).needsRender = false;
+        for (Map.Entry<Long, List<GifRenderer>> entry : dirtyGroups.entrySet()) {
+            SyncGroup syncGroup = SYNC_GROUPS.get(entry.getKey());
+            int frameIndex = (syncGroup != null) ? syncGroup.getCurrentFrame() : 0;
+            for (GifRenderer renderer : entry.getValue()) {
+                renderer.needsRender = false;
+                int safeIdx = frameIndex;
+                if (safeIdx < 0 || safeIdx >= renderer.frameCount) safeIdx = 0;
+            }
+        }
+
+        if (!packetsByPlayer.isEmpty()) {
+            JavaPlugin pl = plugin;
+            if (pl != null && pl.isEnabled()) {
+                Bukkit.getScheduler().runTask(pl, () -> {
+                    for (Map.Entry<UUID, List<Object>> entry : packetsByPlayer.entrySet()) {
+                        Player targetPlayer = Bukkit.getPlayer(entry.getKey());
+                        if (targetPlayer == null || !targetPlayer.isOnline()) continue;
+
+                        for (Object packet : entry.getValue()) {
+                            try {
+                                sender.sendPacket(targetPlayer, packet);
+                            } catch (Exception e) {
+                                if (pl.isEnabled()) {
+                                    pl.getLogger().fine("Failed to send map packet to " +
+                                            entry.getKey() + ": " + e.getMessage());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                });
+            }
         }
     }
 
     public static void startSyncGroup(long syncID) {
         SyncGroup group = SYNC_GROUPS.get(syncID);
-        if (group != null) {
-            group.start();
-        }
+        if (group != null) group.start();
     }
 
     public static void resetSyncTime(long syncId) {
         SyncGroup group = SYNC_GROUPS.get(syncId);
-        if (group != null && group.active) {
-            group.start();
-        }
+        if (group != null && group.active) group.start();
     }
 
     public static void registerMapLocation(int mapId, Location location) {
-        if (location != null) {
-            MAP_LOCATIONS.put(mapId, location.clone());
-        }
+        if (location != null) MAP_LOCATIONS.put(mapId, location.clone());
+    }
+
+    public static int getCurrentFrameForSync(long syncId) {
+        SyncGroup group = SYNC_GROUPS.get(syncId);
+        return group != null ? group.getCurrentFrame() : 0;
     }
 
     public static int getActiveCount() {
         return RENDERERS.size();
     }
 
-    public GifRenderer(List<byte[]> frameList, List<Integer> delays, long syncID) {
-        super(false);
-
+    public GifRenderer(int mapId, List<byte[]> frameList, List<Integer> delays, long syncID) {
         this.id = ID_COUNTER.incrementAndGet();
+        this.cachedMapId = mapId;
         this.syncId = syncID;
         this.frameCount = frameList.size();
-
         this.frames = new byte[frameCount][];
         for (int i = 0; i < frameCount; i++) {
             this.frames[i] = frameList.get(i);
         }
 
+        this.computedDeltas = new FrameDelta[frameCount];
+
         SyncGroup group = SYNC_GROUPS.computeIfAbsent(syncID, k -> new SyncGroup(syncID, delays));
         group.renderers.add(this);
 
-        if (config != null) {
-            config.incrementAnimationCount();
-        }
-    }
-
-    public GifRenderer(List<byte[]> frames, List<Integer> delays) {
-        this(frames, delays, System.currentTimeMillis());
-    }
-
-    public GifRenderer(List<byte[]> frames, int delayMs) {
-        this(frames, createDelayList(frames.size(), delayMs), System.currentTimeMillis());
-    }
-
-    public GifRenderer(List<byte[]> frames, int delayMs, long syncId) {
-        this(frames, createDelayList(frames.size(), delayMs), syncId);
-    }
-
-    private static List<Integer> createDelayList(int size, int delay) {
-        int clamped = Math.max(50, delay);
-        List<Integer> delays = new ArrayList<>(size);
-        for (int i = 0; i < size; i++) {
-            delays.add(clamped);
-        }
-        return delays;
-    }
-
-    @Override
-    public void render(MapView map, MapCanvas canvas, Player player) {
-        if (this.mapView == null) {
-            setMapView(map);
-        }
-
-        SyncGroup group = SYNC_GROUPS.get(syncId);
-        int frameIndex = (group != null) ? group.getCurrentFrame() : 0;
-
-        if (frameIndex < 0 || frameIndex >= frameCount) {
-            frameIndex = 0;
-        }
-
-        if (frameIndex == lastRenderedFrame) {
-            return;
-        }
-
-        byte[] data = frames[frameIndex];
-        if (data == null || data.length < EmageCore.MAP_SIZE) {
-            return;
-        }
-
-        for (int y = 0; y < 128; y++) {
-            int offset = y << 7;
-            for (int x = 0; x < 128; x++) {
-                canvas.setPixel(x, y, data[offset + x]);
-            }
-        }
-
-        lastRenderedFrame = frameIndex;
+        RENDERERS.put(this.cachedMapId, this);
     }
 
     public void remove() {
         SyncGroup group = SYNC_GROUPS.get(syncId);
         if (group != null) {
             group.renderers.remove(this);
-            if (group.renderers.isEmpty()) {
-                SYNC_GROUPS.remove(syncId);
+            if (group.renderers.isEmpty()) SYNC_GROUPS.remove(syncId);
+        }
+        RENDERERS.remove(cachedMapId);
+        MAP_LOCATIONS.remove(cachedMapId);
+    }
+
+    private FrameDelta buildDeltaInfo(byte[] current, byte[] previous) {
+        int minX = 128, maxX = -1, minY = 128, maxY = -1;
+        for (int y = 0; y < 128; y++) {
+            for (int x = 0; x < 128; x++) {
+                int idx = y * 128 + x;
+                if (current[idx] != previous[idx]) {
+                    if (x < minX) minX = x;
+                    if (x > maxX) maxX = x;
+                    if (y < minY) minY = y;
+                    if (y > maxY) maxY = y;
+                }
             }
         }
+        if (maxX < 0) return null;
 
-        if (mapView != null) {
-            @SuppressWarnings("deprecation")
-            int mapID = mapView.getId();
-            RENDERERS.remove(mapID);
-            MAP_LOCATIONS.remove(mapID);
+        int columns = maxX - minX + 1;
+        int rows = maxY - minY + 1;
+        byte[] deltaData = new byte[columns * rows];
+
+        for (int y = 0; y < rows; y++) {
+            for (int x = 0; x < columns; x++) {
+                deltaData[y * columns + x] = current[(minY + y) * 128 + (minX + x)];
+            }
         }
-
-        if (config != null) {
-            config.decrementAnimationCount();
-        }
-    }
-
-    public void setMapView(MapView view) {
-        this.mapView = view;
-        if (view != null) {
-            @SuppressWarnings("deprecation")
-            int mapId = view.getId();
-            RENDERERS.put(mapId, this);
-        }
-    }
-
-    public MapView getMapView() {
-        return this.mapView;
-    }
-
-    public long getSyncId() {
-        return syncId;
-    }
-
-    public int getId() {
-        return id;
+        return new FrameDelta(minX, minY, columns, rows, deltaData);
     }
 
     public int getFrameCount() {
         return frameCount;
     }
 
-    public List<byte[]> getFrames() {
-        return Collections.unmodifiableList(Arrays.asList(frames));
-    }
-
-    public List<Integer> getDelays() {
-        SyncGroup group = SYNC_GROUPS.get(syncId);
-        if (group != null && group.delays != null) {
-            List<Integer> delayList = new ArrayList<>(group.frameCount);
-            for (int delay : group.delays) {
-                delayList.add(delay);
-            }
-            return delayList;
-        }
-        return Collections.emptyList();
-    }
-
-    public int getAverageDelay() {
-        SyncGroup group = SYNC_GROUPS.get(syncId);
-        if (group != null && group.frameCount > 0) {
-            return (int) (group.totalDuration / group.frameCount);
-        }
-        return 100;
+    public void setNeedsRender(boolean needsRender) {
+        this.needsRender = needsRender;
     }
 }
