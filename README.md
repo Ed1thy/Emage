@@ -6,7 +6,7 @@ A highly-optimized image and GIF renderer built for modern Paper servers. By com
 [![SpigotMC](https://img.shields.io/badge/SpigotMC-Download-orange)](https://www.spigotmc.org/resources/emage.130410/)
 
 ## Requirements
-* **Java 21** or higher
+* **Java 22** or higher
 * **Paper 1.21** or higher
 * **[PacketEvents](https://modrinth.com/plugin/packetevents)** (Required dependency)
 
