@@ -1,0 +1,16 @@
+name: Emage
+version: '${version}'
+main: net.ed1thy.emage.Emage
+api-version: '1.21'
+authors: [ Ed1thy ]
+
+dependencies:
+  server:
+    packetevents:
+      load: BEFORE
+      required: true
+      join-classpath: true
+
+permissions:
+  emage.admin:
+    default: op

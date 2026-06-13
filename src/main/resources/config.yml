@@ -1,0 +1,58 @@
+updates:
+  # It is NOT RECOMMENDED to turn this off. Running outdated versions
+  # means you miss out on critical security patches, major performance
+  # improvements, and bug fixes.
+  check-for-updates: true
+
+performance:
+  max-packets-per-tick: 64
+
+storage:
+  database:
+    file-name: "emage_meta.db"
+    pool-size: 2
+  map-data-directory: "map_data"
+
+quality:
+  max-gif-frames: 240
+  max-gif-grid-size: 5
+  max-image-grid-size: 16
+
+downloads:
+  max-file-size-mb: 50
+  connect-timeout-seconds: 10
+  read-timeout-seconds: 30
+  max-redirects: 5
+  block-internal-urls: true
+
+cache:
+  max-memory-mb: 100
+  expire-minutes: 30
+
+rate-limits:
+  cooldown-seconds: 10
+  max-concurrent-tasks: 3
+
+messages:
+  prefix: "<b><gradient:#F57E3A:#CB6E38:#C36220>Emage</gradient></b> <dark_gray>•</dark_gray> "
+  usage: "<red>Usage: <gray>/emage render <url> [columns] [rows]"
+  no-frame: "<red>You must be looking at an item frame."
+  invalid-url: "<red>Invalid or disallowed URL provided."
+  only-players: "<red>Only players can use this command."
+  processing-started: "<color:#fd6039>Processing image for <color:#f3c6bb><width>x<height></color> grid. Please wait..."
+  success: "<green>Successfully applied image to <color:#f3c6bb><total></color> frame(s)!"
+  error: "<red>An error occurred: <gray><error>"
+  process-error: "<red>Failed to process image: <gray><error>"
+  read-error: "<red>Error reading image: <gray><error>"
+  max-tasks-reached: "<red>The server is currently processing the maximum number of images allowed. Please wait a moment."
+  cooldown-active: "<red>You are doing this too fast. Please wait before applying another image."
+  auto-detect-failed: "<red>Could not automatically detect the grid. Ensure there are no missing ItemFrames."
+  not-enough-frames: "<red>Not enough empty ItemFrames found on this wall to fit a <color:#f3c6bb><width>x<height></color> image."
+  gif-size-limit: "<red>GIFs are limited to a max grid size of <color:#f3c6bb><max_width>x<max_height></color>."
+  image-size-limit: "<red>Images are limited to a max grid size of <color:#f3c6bb><max_width>x<max_height></color>."
+  gif-frame-limit: "<red>GIFs are limited to a maximum of <color:#f3c6bb><max_frames></color> frames. (Provided GIF has <color:#f3c6bb><frames></color>)"
+  not-emage-frame: "<red>This ItemFrame does not contain an Emage render."
+  metadata-not-found: "<red>Failed to find grid metadata in database."
+  grid-removed: "<green>Grid removed successfully."
+  cleanup-failed: "<red>Failed to cleanup files."
+  update-available: "<yellow>A new version of <gradient:#F57E3A:#CB6E38:#C36220>Emage</gradient> (<green><version></green>) is available! You are running <red><current_version></red>. Download it here: <click:open_url:'<url>'><aqua><u><url></u></aqua></click>"
