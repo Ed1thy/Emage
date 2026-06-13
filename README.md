@@ -4,7 +4,6 @@ A highly-optimized image and GIF renderer built for modern Paper servers. By com
 
 [![Modrinth](https://img.shields.io/modrinth/dt/emage?logo=modrinth&label=Modrinth&color=00AF5C)](https://modrinth.com/plugin/emage)
 [![SpigotMC](https://img.shields.io/badge/SpigotMC-Download-orange)](https://www.spigotmc.org/resources/emage.130410/)
-[![GitHub](https://img.shields.io/github/v/release/Ed1thy/Emage?logo=github&label=GitHub)](https://github.com/Ed1thy/Emage)
 
 ## Requirements
 * **Java 21** or higher
