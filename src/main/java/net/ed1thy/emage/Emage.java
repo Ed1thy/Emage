@@ -1,5 +1,6 @@
 package net.ed1thy.emage;
 
+import org.bstats.bukkit.Metrics;
 import net.ed1thy.emage.command.CommandRegistry;
 import net.ed1thy.emage.config.ConfigManager;
 import net.ed1thy.emage.config.MessageManager;
@@ -31,6 +32,9 @@ public class Emage extends JavaPlugin {
 
     @Override
     public void onEnable() {
+        int pluginID = 29638;
+        Metrics metrics = new Metrics(this, pluginID);
+
         ConfigManager configManager = new ConfigManager(this);
         configManager.load();
 
