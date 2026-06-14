@@ -35,6 +35,12 @@ public class ConfigManager {
     public int cooldownSeconds;
     public int maxConcurrentTasks;
 
+    public boolean useActionBar;
+    public boolean enableSounds;
+    public String soundSuccess;
+    public String soundError;
+    public String soundStart;
+
     public ConfigManager(@NotNull Emage plugin) {
         this.plugin = plugin;
     }
@@ -70,6 +76,12 @@ public class ConfigManager {
 
         this.cooldownSeconds = config.getInt("rate-limits.cooldown-seconds", 5);
         this.maxConcurrentTasks = config.getInt("rate-limits.max-concurrent-tasks", 3);
+
+        this.useActionBar = config.getBoolean("feedback.use-action-bar", true);
+        this.enableSounds = config.getBoolean("feedback.sounds.enabled", true);
+        this.soundSuccess = config.getString("feedback.sounds.success", "entity.player.levelup");
+        this.soundError = config.getString("feedback.sounds.error", "entity.villager.no");
+        this.soundStart = config.getString("feedback.sounds.start", "block.note_block.chime");
     }
 
     @NotNull

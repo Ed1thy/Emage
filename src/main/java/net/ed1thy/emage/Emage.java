@@ -94,7 +94,7 @@ public class Emage extends JavaPlugin {
         }
 
         ChunkTrackerListener chunkListener = new ChunkTrackerListener(viewerTracker, renderManager);
-        FrameInteractListener interactListener = new FrameInteractListener(this);
+        FrameInteractListener interactListener = new FrameInteractListener(this, messageManager);
 
         getServer().getPluginManager().registerEvents(chunkListener, this);
         getServer().getPluginManager().registerEvents(interactListener, this);

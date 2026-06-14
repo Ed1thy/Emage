@@ -22,8 +22,7 @@ import org.bukkit.inventory.meta.MapMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.jetbrains.annotations.NotNull;
 
-import java.util.Collections;
-import java.util.Optional;
+import java.util.*;
 import java.util.concurrent.CopyOnWriteArrayList;
 
 public class PersistenceListener implements Listener {
@@ -51,9 +50,13 @@ public class PersistenceListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onEntitiesLoad(EntitiesLoadEvent event) {
+        List<ItemFrame> loadedFrames = new ArrayList<>();
+        List<FrameNode> createdNodes = new ArrayList<>();
+
         for (Entity entity : event.getEntities()) {
             if (entity instanceof ItemFrame frame) {
                 if (frame.getPersistentDataContainer().has(interactListener.getEmageKey(), PersistentDataType.INTEGER)) {
+                    loadedFrames.add(frame);
                     int mapId = frame.getPersistentDataContainer().get(interactListener.getEmageKey(), PersistentDataType.INTEGER);
 
                     ItemStack bukkitMap = new ItemStack(Material.FILLED_MAP);
@@ -68,43 +71,83 @@ public class PersistenceListener implements Listener {
                             frame.getLocation().getBlockX(), frame.getLocation().getBlockY(), frame.getLocation().getBlockZ(), mapId, peItem);
 
                     chunkTrackerListener.addNodeToCache(node);
-
-                    Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
-                        try {
-                            Optional<MapMetadata> metaOpt = repository.getMetadataByMapId(mapId);
-
-                            Bukkit.getScheduler().runTask(plugin, () -> {
-                                if (metaOpt.isPresent()) {
-                                    MapMetadata meta = metaOpt.get();
-                                    SyncGroup group = renderManager.getSyncGroup(meta.syncGroupID());
-
-                                    if (group == null) {
-                                        group = new SyncGroup(meta, new CopyOnWriteArrayList<>(Collections.singletonList(node)), flatFileStorage, configManager, null);
-                                        renderManager.registerSyncGroup(meta.syncGroupID(), group);
-                                    } else {
-                                        boolean exists = false;
-                                        for (FrameNode existing : group.getNodes()) {
-                                            if (existing.getFrameUUID().equals(node.getFrameUUID())) {
-                                                exists = true;
-                                                break;
-                                            }
-                                        }
-                                        if (!exists) {
-                                            group.addNewWall(Collections.singletonList(node));
-                                        }
-                                    }
-                                } else {
-                                    frame.getPersistentDataContainer().remove(interactListener.getEmageKey());
-                                    frame.setItem(new ItemStack(Material.AIR));
-                                    frame.setVisible(true);
-                                }
-                            });
-                        } catch (Exception e) {
-                            plugin.getLogger().warning("Failed to restore Emage frame: " + e.getMessage());
-                        }
-                    });
+                    createdNodes.add(node);
                 }
             }
         }
+
+        UUID worldUuid = event.getChunk().getWorld().getUID();
+        int cx = event.getChunk().getX();
+        int cz = event.getChunk().getZ();
+
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
+            try {
+                List<UUID> dbExpected = repository.getPlacedFramesInChunk(worldUuid, cx, cz);
+                Set<UUID> actualEmageFrames = new HashSet<>();
+
+                for (ItemFrame frame : loadedFrames) {
+                    actualEmageFrames.add(frame.getUniqueId());
+
+                    if (!dbExpected.contains(frame.getUniqueId())) {
+                        int mapId = frame.getPersistentDataContainer().get(interactListener.getEmageKey(), PersistentDataType.INTEGER);
+                        Optional<MapMetadata> metaOpt = repository.getMetadataByMapId(mapId);
+                        metaOpt.ifPresent(meta -> {
+                            try { repository.addPlacedFrame(meta.syncGroupID(), frame); } catch (Exception ignored) {}
+                        });
+                    }
+                }
+
+                for (UUID expected : dbExpected) {
+                    if (!actualEmageFrames.contains(expected)) {
+                        int groupId = repository.getGroupIdByFrameUUID(expected);
+                        repository.removePlacedFrameByUUID(expected);
+
+                        if (groupId != -1 && repository.countPlacedFrames(groupId) == 0) {
+                            flatFileStorage.deleteSyncGroup(groupId);
+                            repository.deleteSyncGroup(groupId);
+                            Bukkit.getScheduler().runTask(plugin, () -> renderManager.unregisterSyncGroup(groupId));
+                        }
+                    }
+                }
+
+                for (int i = 0; i < loadedFrames.size(); i++) {
+                    ItemFrame frame = loadedFrames.get(i);
+                    FrameNode node = createdNodes.get(i);
+                    int mapId = frame.getPersistentDataContainer().get(interactListener.getEmageKey(), PersistentDataType.INTEGER);
+
+                    Optional<MapMetadata> metaOpt = repository.getMetadataByMapId(mapId);
+
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        if (metaOpt.isPresent()) {
+                            MapMetadata meta = metaOpt.get();
+                            SyncGroup group = renderManager.getSyncGroup(meta.syncGroupID());
+
+                            if (group == null) {
+                                group = new SyncGroup(meta, new CopyOnWriteArrayList<>(Collections.singletonList(node)), flatFileStorage, configManager, null);
+                                renderManager.registerSyncGroup(meta.syncGroupID(), group);
+                            } else {
+                                boolean exists = false;
+                                for (FrameNode existing : group.getNodes()) {
+                                    if (existing.getFrameUUID().equals(node.getFrameUUID())) {
+                                        exists = true;
+                                        break;
+                                    }
+                                }
+                                if (!exists) {
+                                    group.addNewWall(Collections.singletonList(node));
+                                }
+                            }
+                        } else {
+                            frame.getPersistentDataContainer().remove(interactListener.getEmageKey());
+                            frame.setItem(new ItemStack(Material.AIR));
+                            frame.setVisible(true);
+                        }
+                    });
+                }
+
+            } catch (Exception e) {
+                plugin.getLogger().warning("Failed GC healing / restore for Emage chunk: " + e.getMessage());
+            }
+        });
     }
 }

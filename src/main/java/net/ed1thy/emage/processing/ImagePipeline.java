@@ -7,6 +7,7 @@ import net.ed1thy.emage.model.MapFrameUpdate;
 import net.ed1thy.emage.processing.dither.BlueNoiseDither;
 import net.ed1thy.emage.storage.FlatFileStorage;
 import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.awt.AlphaComposite;
 import java.awt.Graphics2D;
@@ -19,6 +20,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 
 public class ImagePipeline {
 
@@ -41,7 +43,8 @@ public class ImagePipeline {
     }
 
     public CompletableFuture<ConcurrentHashMap<Long, MapFrameUpdate>> processStreamAsync(
-            @NotNull ImageFrameProvider decoder, int syncGroupId, @NotNull List<Integer> virtualMapIds, int columns, int rows) {
+            @NotNull ImageFrameProvider decoder, int syncGroupId, @NotNull List<Integer> virtualMapIds, int columns, int rows,
+            @Nullable Consumer<Double> progressCallback) {
 
         return CompletableFuture.supplyAsync(() -> {
             ConcurrentHashMap<Long, MapFrameUpdate> preloadedMap = new ConcurrentHashMap<>();
@@ -56,7 +59,9 @@ public class ImagePipeline {
                 int totalHeight = rows * 128;
                 byte[][] previousMapFrames = new byte[virtualMapIds.size()][16384];
 
-                for (int frameIndex = 0; frameIndex < decoder.getFrameCount(); frameIndex++) {
+                int totalFramesCount = decoder.getFrameCount();
+
+                for (int frameIndex = 0; frameIndex < totalFramesCount; frameIndex++) {
                     BufferedImage rawFrame = decoder.getFrame(frameIndex);
 
                     double scaleX = (double) totalWidth / rawFrame.getWidth();
@@ -137,6 +142,10 @@ public class ImagePipeline {
                                 for (MapFrameUpdate update : frameUpdates.values()) update.freeMemory();
                             } catch (Exception e) { e.printStackTrace(); }
                         }, vtExecutor));
+                    }
+
+                    if (progressCallback != null) {
+                        progressCallback.accept((double) (frameIndex + 1) / totalFramesCount);
                     }
                 }
 

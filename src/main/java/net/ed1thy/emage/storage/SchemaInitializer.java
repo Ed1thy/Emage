@@ -35,18 +35,29 @@ public class SchemaInitializer {
                 );
                 """;
 
-        String createIndex = "CREATE INDEX IF NOT EXISTS idx_emage_maps_group ON emage_maps(sync_group_id);";
+        String createPlacedFramesTable = """
+                CREATE TABLE IF NOT EXISTS emage_placed_frames (
+                    frame_uuid VARCHAR(36) PRIMARY KEY,
+                    sync_group_id INTEGER NOT NULL,
+                    world_uuid VARCHAR(36) NOT NULL,
+                    chunk_x INTEGER NOT NULL,
+                    chunk_z INTEGER NOT NULL,
+                    FOREIGN KEY (sync_group_id) REFERENCES emage_metadata(sync_group_id) ON DELETE CASCADE
+                );
+                """;
 
         try (Connection connection = dbManager.getConnection();
              Statement statement = connection.createStatement()) {
 
             statement.execute(createMetadataTable);
             statement.execute(createMapIdsTable);
-            statement.execute(createIndex);
+            statement.execute(createPlacedFramesTable);
 
-            try {
-                statement.execute("ALTER TABLE emage_metadata ADD COLUMN file_hash VARCHAR(64) DEFAULT '';");
-            } catch (SQLException ignored) {}
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_emage_maps_group ON emage_maps(sync_group_id);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_emage_frames_chunk ON emage_placed_frames(world_uuid, chunk_x, chunk_z);");
+            statement.execute("CREATE INDEX IF NOT EXISTS idx_emage_frames_group ON emage_placed_frames(sync_group_id);");
+
+            try { statement.execute("ALTER TABLE emage_metadata ADD COLUMN file_hash VARCHAR(64) DEFAULT '';"); } catch (SQLException ignored) {}
 
             statement.execute("INSERT OR IGNORE INTO sqlite_sequence (name, seq) VALUES ('emage_maps', 1000000);");
             statement.execute("UPDATE sqlite_sequence SET seq = 1000000 WHERE name = 'emage_maps' AND seq > 1000000000;");

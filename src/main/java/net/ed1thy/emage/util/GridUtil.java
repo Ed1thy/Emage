@@ -5,14 +5,25 @@ import org.bukkit.entity.ItemFrame;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 public class GridUtil {
 
     public record GridData(List<ItemFrame> frames, int columns, int rows) {}
 
-    private record GridVectors(int colDx, int colDy, int colDz, int rowDx, int rowDy, int rowDz) {}
+    private record GridVectors(int colDx, int colDy, int colDz, int rowDx, int rowDy, int rowDz) {
+        public int getColOffset(int dx, int dy, int dz) {
+            return dx * colDx + dy * colDy + dz * colDz;
+        }
+        public int getRowOffset(int dx, int dy, int dz) {
+            return dx * rowDx + dy * rowDy + dz * rowDz;
+        }
+    }
+
+    public static class MissingFrameException extends Exception {
+        public final int x, y, z;
+        public MissingFrameException(int x, int y, int z) { this.x = x; this.y = y; this.z = z; }
+    }
 
     private static GridVectors getVectors(BlockFace facing) {
         return switch (facing) {
@@ -26,114 +37,91 @@ public class GridUtil {
         };
     }
 
-    @NotNull
-    public static ItemFrame findTopLeftFrame(@NotNull ItemFrame clickedFrame) {
-        GridVectors v = getVectors(clickedFrame.getFacing());
-
-        int upX = -v.rowDx(), upY = -v.rowDy(), upZ = -v.rowDz();
-        int leftX = -v.colDx(), leftY = -v.colDy(), leftZ = -v.colDz();
-
-        if (upX == 0 && upY == 0 && upZ == 0) return clickedFrame;
-
-        ItemFrame current = clickedFrame;
-        boolean moved;
-        do {
-            moved = false;
-            ItemFrame above = getFrameAt(current,
-                    current.getLocation().getBlockX() + upX,
-                    current.getLocation().getBlockY() + upY,
-                    current.getLocation().getBlockZ() + upZ);
-
-            if (above != null) {
-                current = above;
-                moved = true;
-                continue;
-            }
-
-            ItemFrame left = getFrameAt(current,
-                    current.getLocation().getBlockX() + leftX,
-                    current.getLocation().getBlockY() + leftY,
-                    current.getLocation().getBlockZ() + leftZ);
-
-            if (left != null) {
-                current = left;
-                moved = true;
-            }
-        } while (moved);
-
-        return current;
+    private static String getLocKey(int x, int y, int z) {
+        return x + "," + y + "," + z;
     }
 
     @Nullable
-    public static GridData autoDetectGrid(@NotNull ItemFrame topLeft, int maxLimit) {
-        GridVectors v = getVectors(topLeft.getFacing());
+    public static GridData detectGrid(@NotNull ItemFrame clickedFrame, int inputCols, int inputRows, int maxLimit) throws MissingFrameException {
+        GridVectors v = getVectors(clickedFrame.getFacing());
         if (v.colDx() == 0 && v.colDy() == 0 && v.colDz() == 0) return null;
 
-        int columns = 0;
-        while (columns < maxLimit) {
-            ItemFrame frame = getFrameAt(topLeft,
-                    topLeft.getLocation().getBlockX() + (columns * v.colDx()),
-                    topLeft.getLocation().getBlockY() + (columns * v.colDy()),
-                    topLeft.getLocation().getBlockZ() + (columns * v.colDz()));
-            if (frame == null) break;
-            columns++;
+        int searchRadius = maxLimit + 2;
+        Map<String, ItemFrame> cache = new HashMap<>();
+        for (org.bukkit.entity.Entity e : clickedFrame.getWorld().getNearbyEntities(clickedFrame.getLocation(), searchRadius, searchRadius, searchRadius)) {
+            if (e instanceof ItemFrame f && f.getFacing() == clickedFrame.getFacing()) {
+                cache.put(getLocKey(f.getLocation().getBlockX(), f.getLocation().getBlockY(), f.getLocation().getBlockZ()), f);
+            }
         }
 
-        int rows = 0;
-        while (rows < maxLimit) {
-            ItemFrame frame = getFrameAt(topLeft,
-                    topLeft.getLocation().getBlockX() + (rows * v.rowDx()),
-                    topLeft.getLocation().getBlockY() + (rows * v.rowDy()),
-                    topLeft.getLocation().getBlockZ() + (rows * v.rowDz()));
-            if (frame == null) break;
-            rows++;
+        Set<ItemFrame> visited = new HashSet<>();
+        Queue<ItemFrame> queue = new LinkedList<>();
+        queue.add(clickedFrame);
+        visited.add(clickedFrame);
+
+        int minCol = 0, maxCol = 0;
+        int minRow = 0, maxRow = 0;
+
+        int startX = clickedFrame.getLocation().getBlockX();
+        int startY = clickedFrame.getLocation().getBlockY();
+        int startZ = clickedFrame.getLocation().getBlockZ();
+
+        while (!queue.isEmpty()) {
+            ItemFrame curr = queue.poll();
+            int dx = curr.getLocation().getBlockX() - startX;
+            int dy = curr.getLocation().getBlockY() - startY;
+            int dz = curr.getLocation().getBlockZ() - startZ;
+
+            int col = v.getColOffset(dx, dy, dz);
+            int row = v.getRowOffset(dx, dy, dz);
+
+            minCol = Math.min(minCol, col);
+            maxCol = Math.max(maxCol, col);
+            minRow = Math.min(minRow, row);
+            maxRow = Math.max(maxRow, row);
+
+            for (int dc = -1; dc <= 1; dc++) {
+                for (int dr = -1; dr <= 1; dr++) {
+                    if (dc == 0 && dr == 0) continue;
+                    int nx = curr.getLocation().getBlockX() + dc * v.colDx() + dr * v.rowDx();
+                    int ny = curr.getLocation().getBlockY() + dc * v.colDy() + dr * v.rowDy();
+                    int nz = curr.getLocation().getBlockZ() + dc * v.colDz() + dr * v.rowDz();
+
+                    ItemFrame neighbor = cache.get(getLocKey(nx, ny, nz));
+                    if (neighbor != null && !visited.contains(neighbor)) {
+                        visited.add(neighbor);
+                        queue.add(neighbor);
+                    }
+                }
+            }
         }
 
-        if (columns == 0 || rows == 0) return null;
+        int columns = inputCols == -1 ? (maxCol - minCol + 1) : inputCols;
+        int rows = inputRows == -1 ? (maxRow - minRow + 1) : inputRows;
+
+        if (columns > maxLimit || rows > maxLimit) {
+            return null;
+        }
+
+        int topLeftX = startX + minCol * v.colDx() + minRow * v.rowDx();
+        int topLeftY = startY + minCol * v.colDy() + minRow * v.rowDy();
+        int topLeftZ = startZ + minCol * v.colDz() + minRow * v.rowDz();
 
         List<ItemFrame> grid = new ArrayList<>(columns * rows);
         for (int r = 0; r < rows; r++) {
             for (int c = 0; c < columns; c++) {
-                int targetX = topLeft.getLocation().getBlockX() + (c * v.colDx()) + (r * v.rowDx());
-                int targetY = topLeft.getLocation().getBlockY() + (c * v.colDy()) + (r * v.rowDy());
-                int targetZ = topLeft.getLocation().getBlockZ() + (c * v.colDz()) + (r * v.rowDz());
+                int tx = topLeftX + c * v.colDx() + r * v.rowDx();
+                int ty = topLeftY + c * v.colDy() + r * v.rowDy();
+                int tz = topLeftZ + c * v.colDz() + r * v.rowDz();
 
-                ItemFrame foundFrame = getFrameAt(topLeft, targetX, targetY, targetZ);
-                if (foundFrame == null) {
-                    return null;
+                ItemFrame f = cache.get(getLocKey(tx, ty, tz));
+                if (f == null) {
+                    throw new MissingFrameException(tx, ty, tz);
                 }
-                grid.add(foundFrame);
+                grid.add(f);
             }
         }
 
         return new GridData(grid, columns, rows);
-    }
-
-    @Nullable
-    public static List<ItemFrame> findGrid(@NotNull ItemFrame topLeft, int columns, int rows) {
-        GridVectors v = getVectors(topLeft.getFacing());
-        if (v.colDx() == 0 && v.colDy() == 0 && v.colDz() == 0) return null;
-
-        List<ItemFrame> grid = new ArrayList<>(columns * rows);
-        for (int r = 0; r < rows; r++) {
-            for (int c = 0; c < columns; c++) {
-                int targetX = topLeft.getLocation().getBlockX() + (c * v.colDx()) + (r * v.rowDx());
-                int targetY = topLeft.getLocation().getBlockY() + (c * v.colDy()) + (r * v.rowDy());
-                int targetZ = topLeft.getLocation().getBlockZ() + (c * v.colDz()) + (r * v.rowDz());
-
-                ItemFrame foundFrame = getFrameAt(topLeft, targetX, targetY, targetZ);
-                if (foundFrame == null) return null;
-                grid.add(foundFrame);
-            }
-        }
-        return grid;
-    }
-
-    private static ItemFrame getFrameAt(ItemFrame reference, int x, int y, int z) {
-        return reference.getWorld().getNearbyEntities(
-                new org.bukkit.Location(reference.getWorld(), x + 0.5, y + 0.5, z + 0.5),
-                0.5, 0.5, 0.5,
-                entity -> entity instanceof ItemFrame && ((ItemFrame) entity).getFacing() == reference.getFacing()
-        ).stream().map(e -> (ItemFrame) e).findFirst().orElse(null);
     }
 }
