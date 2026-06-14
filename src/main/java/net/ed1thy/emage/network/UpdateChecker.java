@@ -28,7 +28,7 @@ public class UpdateChecker {
 
     private static final String MODRINTH_SLUG = "emage";
     private static final String GITHUB_REPO = "Ed1thy/Emage";
-    private static final String SPIGOT_ID = "00000";
+    private static final String SPIGOT_ID = "130410";
 
     public UpdateChecker(@NotNull Emage plugin, @NotNull MessageManager messageManager) {
         this.plugin = plugin;
