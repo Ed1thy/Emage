@@ -6,7 +6,7 @@
 
     <groupId>net.ed1thy</groupId>
     <artifactId>Emage</artifactId>
-    <version>1.5.1</version>
+    <version>1.5.1-BUGFIX</version>
     <packaging>jar</packaging>
 
     <name>Emage</name>
