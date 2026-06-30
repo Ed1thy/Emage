@@ -29,6 +29,8 @@ public class Emage extends JavaPlugin {
     private DatabaseManager databaseManager;
     private RenderManager renderManager;
     private FlatFileStorage flatFileStorage;
+    private ColorPalette colorLUT;
+    private ImagePipeline imagePipeline;
 
     @Override
     public void onEnable() {
@@ -45,7 +47,7 @@ public class Emage extends JavaPlugin {
         new SchemaInitializer(databaseManager).initialize();
 
         MapMetadataRepository metadataRepository = new MapMetadataRepository(databaseManager);
-        this.flatFileStorage = new FlatFileStorage(configManager);
+        this.flatFileStorage = new FlatFileStorage(databaseManager);
 
         getServer().getScheduler().runTaskAsynchronously(this, () -> {
             try {
@@ -59,11 +61,10 @@ public class Emage extends JavaPlugin {
                     }
                 }
 
-                activeIds = metadataRepository.getAllSyncGroupIDs();
-                int deletedFolders = flatFileStorage.cleanupOrphanedDirectories(activeIds);
+                int deletedOrphans = flatFileStorage.cleanupOrphanedFrameData();
 
-                if (brokenDbEntries > 0 || deletedFolders > 0) {
-                    getLogger().info(String.format("Removed %d broken DB entries and %d orphaned folders.", brokenDbEntries, deletedFolders));
+                if (brokenDbEntries > 0 || deletedOrphans > 0) {
+                    getLogger().info(String.format("Removed %d broken DB entries and %d orphaned frame data records.", brokenDbEntries, deletedOrphans));
                 }
             } catch (Exception e) {
                 getLogger().warning("Failed to run Storage Sweeper: " + e.getMessage());
@@ -72,16 +73,16 @@ public class Emage extends JavaPlugin {
 
         getServer().getScheduler().runTaskTimerAsynchronously(this, () -> {
             databaseManager.runWalCheckpoint();
-        }, 20 * 60 * 60 * 24L, 20 * 60 * 60 * 24L);
+        }, 20L * 60 * 60, 20L * 60 * 60);
 
         DnsResolver dnsChecker = new DnsResolver(configManager);
         EHttpClient httpClient = new EHttpClient(configManager);
         ImageDownloader imageDownloader = new ImageDownloader(httpClient, dnsChecker, configManager);
 
-        ColorPalette colorLUT = new ColorPalette();
+        this.colorLUT = new ColorPalette();
         colorLUT.generateLUT().thenRun(() -> getLogger().info("Color LUT successfully generated."));
 
-        ImagePipeline imagePipeline = new ImagePipeline(colorLUT, flatFileStorage);
+        this.imagePipeline = new ImagePipeline(colorLUT, flatFileStorage);
 
         ChunkViewerTracker viewerTracker = new ChunkViewerTracker();
         PacketSender packetSender = new PacketSender();
@@ -128,6 +129,9 @@ public class Emage extends JavaPlugin {
     @Override
     public void onDisable() {
         getLogger().info("Emage shutting down..");
+
+        if (imagePipeline != null) imagePipeline.shutdown();
+        if (colorLUT != null) colorLUT.shutdown();
 
         if (renderManager != null) {
             renderManager.shutdown();

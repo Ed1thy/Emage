@@ -86,6 +86,11 @@ public class GifDecoder implements ImageFrameProvider {
         if (!id.toString().startsWith("GIF")) return;
         width = readShort();
         height = readShort();
+
+        if (width > 4096 || height > 4096 || width <= 0 || height <= 0) {
+            throw new SecurityException("Security Exception: GIF dimensions (" + width + "x" + height + ") exceed the safe limit of 4096x4096 pixels.");
+        }
+
         int packed = read();
         gctFlag = (packed & 0x80) != 0;
         gctSize = 2 << (packed & 7);

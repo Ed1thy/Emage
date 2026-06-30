@@ -4,8 +4,6 @@ import net.ed1thy.emage.Emage;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.jetbrains.annotations.NotNull;
 
-import java.io.File;
-
 public class ConfigManager {
 
     private final Emage plugin;
@@ -16,8 +14,6 @@ public class ConfigManager {
 
     public String dbFileName;
     public int dbPoolSize;
-    public String mapDataDirectory;
-    public File mapDataFolder;
 
     public int maxGifFrames;
     public int maxGifGridSize;
@@ -55,11 +51,6 @@ public class ConfigManager {
 
         this.dbFileName = config.getString("storage.database.file-name", "emage_meta.db");
         this.dbPoolSize = config.getInt("storage.database.pool-size", 2);
-        this.mapDataDirectory = config.getString("storage.map-data-directory", "map_data");
-        this.mapDataFolder = new File(plugin.getDataFolder(), mapDataDirectory);
-        if (!mapDataFolder.exists()) {
-            mapDataFolder.mkdirs();
-        }
 
         this.maxGifFrames = config.getInt("quality.max-gif-frames", 240);
         this.maxGifGridSize = config.getInt("quality.max-gif-grid-size", 5);

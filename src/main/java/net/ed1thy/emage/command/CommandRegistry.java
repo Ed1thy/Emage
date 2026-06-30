@@ -37,6 +37,7 @@ import java.io.ByteArrayInputStream;
 import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class CommandRegistry {
@@ -120,35 +121,72 @@ public class CommandRegistry {
                     Bukkit.getScheduler().runTask(plugin, () -> handleRemoveSync(player));
                 })
         );
+
+        commandManager.command(builder.literal("reload")
+                .permission("emage.admin")
+                .handler(ctx -> {
+                    configManager.load();
+                    messageManager.load();
+                    messageManager.sendConfigReloaded(ctx.sender().getSender());
+                })
+        );
     }
 
     private List<ItemFrame> findContiguousEmageFrames(ItemFrame start, List<Integer> validMapIds) {
         List<ItemFrame> result = new ArrayList<>();
-        Set<UUID> visited = new HashSet<>();
-        Queue<ItemFrame> queue = new LinkedList<>();
 
-        queue.add(start);
-        visited.add(start.getUniqueId());
+        int estimatedRadius = (int) Math.ceil(Math.sqrt(validMapIds.size())) + 2;
 
-        while (!queue.isEmpty()) {
-            ItemFrame current = queue.poll();
-            result.add(current);
-
-            for (Entity entity : current.getNearbyEntities(2.0, 2.0, 2.0)) {
-                if (entity instanceof ItemFrame neighbor && !visited.contains(neighbor.getUniqueId())) {
-                    if (neighbor.getFacing() == current.getFacing()) {
-                        if (neighbor.getPersistentDataContainer().has(interactListener.getEmageKey(), PersistentDataType.INTEGER)) {
-                            int nMapId = neighbor.getPersistentDataContainer().get(interactListener.getEmageKey(), PersistentDataType.INTEGER);
-                            if (validMapIds.contains(nMapId)) {
-                                visited.add(neighbor.getUniqueId());
-                                queue.add(neighbor);
-                            }
-                        }
+        Map<String, ItemFrame> cache = new HashMap<>();
+        for (Entity entity : start.getWorld().getNearbyEntities(start.getLocation(), estimatedRadius, estimatedRadius, estimatedRadius)) {
+            if (entity instanceof ItemFrame f && f.getFacing() == start.getFacing()) {
+                if (f.getPersistentDataContainer().has(interactListener.getEmageKey(), PersistentDataType.INTEGER)) {
+                    int mapId = f.getPersistentDataContainer().get(interactListener.getEmageKey(), PersistentDataType.INTEGER);
+                    if (validMapIds.contains(mapId)) {
+                        cache.put(f.getLocation().getBlockX() + "," + f.getLocation().getBlockY() + "," + f.getLocation().getBlockZ(), f);
                     }
                 }
             }
         }
+
+        Set<UUID> visited = new HashSet<>();
+        Queue<ItemFrame> queue = new LinkedList<>();
+
+        queue.add(start);
+
+        int maxIterations = validMapIds.size() * 2 + 10;
+        int iterations = 0;
+
+        while (!queue.isEmpty()) {
+            if (iterations++ > maxIterations) break;
+
+            ItemFrame current = queue.poll();
+            if (current == null) continue;
+
+            UUID uniqueId = current.getUniqueId();
+            if (uniqueId == null || !visited.add(uniqueId)) continue;
+
+            result.add(current);
+
+            int x = current.getLocation().getBlockX();
+            int y = current.getLocation().getBlockY();
+            int z = current.getLocation().getBlockZ();
+
+            checkNeighbor(cache, visited, queue, x + 1, y, z);
+            checkNeighbor(cache, visited, queue, x - 1, y, z);
+            checkNeighbor(cache, visited, queue, x, y + 1, z);
+            checkNeighbor(cache, visited, queue, x, y - 1, z);
+            checkNeighbor(cache, visited, queue, x, y, z + 1);
+            checkNeighbor(cache, visited, queue, x, y, z - 1);
+        }
         return result;
+    }
+
+    private void checkNeighbor(Map<String, ItemFrame> cache, Set<UUID> visited, Queue<ItemFrame> queue, int x, int y, int z) {
+        ItemFrame neighbor = cache.get(x + "," + y + "," + z);
+        if (neighbor != null && !visited.contains(neighbor.getUniqueId())) {
+            queue.add(neighbor);
+        }
     }
 
     private void handleRenderSync(Player player, String url, int inputColumns, int inputRows) {
@@ -241,7 +279,7 @@ public class CommandRegistry {
         });
     }
 
-    private void finalizeFrameApplication(Player player, List<ItemFrame> gridFrames, MapMetadata meta, List<Integer> mapIds, int columns, int rows, net.ed1thy.emage.model.MapFrameUpdate dummy, Map<Long, net.ed1thy.emage.model.MapFrameUpdate> processedFrames) {
+    private void finalizeFrameApplication(Player player, List<ItemFrame> gridFrames, MapMetadata meta, List<Integer> mapIds, int columns, int rows, net.ed1thy.emage.model.MapFrameUpdate dummy, Map<Long, net.ed1thy.emage.model.MapFrameUpdate> processedFrames, Runnable decrementTask) {
         try {
             List<FrameNode> nodes = new ArrayList<>();
             com.github.retrooper.packetevents.protocol.player.User user = com.github.retrooper.packetevents.PacketEvents.getAPI().getPlayerManager().getUser(player);
@@ -298,7 +336,7 @@ public class CommandRegistry {
             messageManager.sendActionBar(player, "");
             messageManager.sendSuccess(player, columns * rows);
         } finally {
-            activeProcessingTasks.decrementAndGet();
+            decrementTask.run();
         }
     }
 
@@ -325,13 +363,25 @@ public class CommandRegistry {
         playerCooldowns.put(player.getUniqueId(), System.currentTimeMillis());
         activeProcessingTasks.incrementAndGet();
 
-        for (ItemFrame frame : gridFrames) {
-            frame.setItem(new ItemStack(Material.CLOCK));
-            frame.setGlowing(true);
-        }
+        AtomicBoolean counterDecremented = new AtomicBoolean(false);
+        Runnable decrementTask = () -> {
+            if (counterDecremented.compareAndSet(false, true)) {
+                activeProcessingTasks.decrementAndGet();
+            }
+        };
 
-        messageManager.sendProcessing(player, finalColumns, finalRows);
-        messageManager.sendActionBar(player, "<color:#4CABBB>Checking Cache & Downloading...</color>");
+        try {
+            for (ItemFrame frame : gridFrames) {
+                frame.setItem(new ItemStack(Material.CLOCK));
+                frame.setGlowing(true);
+            }
+
+            messageManager.sendProcessing(player, finalColumns, finalRows);
+            messageManager.sendActionBar(player, "<color:#4CABBB>Downloading...</color>");
+        } catch (Exception e) {
+            decrementTask.run();
+            throw e;
+        }
 
         Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> {
             try {
@@ -341,7 +391,7 @@ public class CommandRegistry {
                     List<Integer> mapIds = repository.getMapIdsForGroup(meta.syncGroupID());
 
                     Bukkit.getScheduler().runTask(plugin, () -> {
-                        finalizeFrameApplication(player, gridFrames, meta, mapIds, finalColumns, finalRows, null, null);
+                        finalizeFrameApplication(player, gridFrames, meta, mapIds, finalColumns, finalRows, null, null, decrementTask);
                     });
                     return;
                 }
@@ -354,7 +404,7 @@ public class CommandRegistry {
                     messageManager.sendError(player, throwable.getMessage());
                     messageManager.sendActionBar(player, "");
                     revertLoadingSpinner(gridFrames);
-                    activeProcessingTasks.decrementAndGet();
+                    decrementTask.run();
 
                     if (!url.matches("(?i).*\\.(png|jpg|jpeg|gif|webp)(\\?.*)?$")) {
                         messageManager.sendSmartUrlHint(player);
@@ -378,7 +428,7 @@ public class CommandRegistry {
                             List<Integer> mapIds = repository.getMapIdsForGroup(meta.syncGroupID());
 
                             Bukkit.getScheduler().runTask(plugin, () -> {
-                                finalizeFrameApplication(player, gridFrames, meta, mapIds, finalColumns, finalRows, null, null);
+                                finalizeFrameApplication(player, gridFrames, meta, mapIds, finalColumns, finalRows, null, null, decrementTask);
                             });
                             return;
                         }
@@ -397,7 +447,7 @@ public class CommandRegistry {
                                 messageManager.sendReadError(player, "Unsupported image format or corrupt file.");
                                 messageManager.sendActionBar(player, "");
                                 revertLoadingSpinner(gridFrames);
-                                activeProcessingTasks.decrementAndGet();
+                                decrementTask.run();
 
                                 if (!url.matches("(?i).*\\.(png|jpg|jpeg|gif|webp)(\\?.*)?$")) {
                                     messageManager.sendSmartUrlHint(player);
@@ -417,21 +467,21 @@ public class CommandRegistry {
                             messageManager.sendGifSizeLimit(player, configManager.maxGifGridSize, configManager.maxGifGridSize);
                             messageManager.sendActionBar(player, "");
                             revertLoadingSpinner(gridFrames);
-                            activeProcessingTasks.decrementAndGet();
+                            decrementTask.run();
                             return;
                         }
                         if (!isAnimated && (finalColumns > configManager.maxImageGridSize || finalRows > configManager.maxImageGridSize)) {
                             messageManager.sendImageSizeLimit(player, configManager.maxImageGridSize, configManager.maxImageGridSize);
                             messageManager.sendActionBar(player, "");
                             revertLoadingSpinner(gridFrames);
-                            activeProcessingTasks.decrementAndGet();
+                            decrementTask.run();
                             return;
                         }
                         if (isAnimated && totalFrames > configManager.maxGifFrames) {
                             messageManager.sendGifFrameLimit(player, configManager.maxGifFrames, totalFrames);
                             messageManager.sendActionBar(player, "");
                             revertLoadingSpinner(gridFrames);
-                            activeProcessingTasks.decrementAndGet();
+                            decrementTask.run();
                             return;
                         }
 
@@ -442,19 +492,18 @@ public class CommandRegistry {
                             int percent = (int) Math.round(progress * 100);
                             messageManager.sendActionBar(player, "<color:#4CABBB>Processing Frames: <white>" + percent + "%</white></color>");
                         }).whenComplete((processedFrames, err) -> {
-                            try {
-                                if (err != null) {
-                                    err.printStackTrace();
-                                    messageManager.sendProcessError(player, err.getMessage());
-                                    messageManager.sendActionBar(player, "");
-                                    revertLoadingSpinner(gridFrames);
-                                    return;
-                                }
+                            if (err != null) {
+                                err.printStackTrace();
+                                messageManager.sendProcessError(player, err.getMessage());
+                                messageManager.sendActionBar(player, "");
+                                revertLoadingSpinner(gridFrames);
+                                decrementTask.run();
+                                return;
+                            }
 
-                                Bukkit.getScheduler().runTask(plugin, () -> {
-                                    finalizeFrameApplication(player, gridFrames, meta, mapIds, finalColumns, finalRows, null, processedFrames);
-                                });
-                            } finally {}
+                            Bukkit.getScheduler().runTask(plugin, () -> {
+                                finalizeFrameApplication(player, gridFrames, meta, mapIds, finalColumns, finalRows, null, processedFrames, decrementTask);
+                            });
                         });
 
                     } catch (Exception e) {
@@ -462,7 +511,7 @@ public class CommandRegistry {
                         messageManager.sendActionBar(player, "");
                         revertLoadingSpinner(gridFrames);
                         closeStreamQuietly(inputStream);
-                        activeProcessingTasks.decrementAndGet();
+                        decrementTask.run();
                     }
                 }, vtExecutor);
             });

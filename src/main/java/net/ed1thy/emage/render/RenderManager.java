@@ -3,6 +3,7 @@ package net.ed1thy.emage.render;
 import com.github.retrooper.packetevents.PacketEvents;
 import com.github.retrooper.packetevents.protocol.player.User;
 import com.github.retrooper.packetevents.wrapper.PacketWrapper;
+import io.netty.channel.Channel;
 import net.ed1thy.emage.Emage;
 import net.ed1thy.emage.config.ConfigManager;
 import net.ed1thy.emage.model.FrameNode;
@@ -28,10 +29,11 @@ public class RenderManager {
 
     private final int maxPacketsPerTick;
     private static final int MAX_PACKETS_PER_PLAYER_PER_TICK = 150;
+    private static final int MAX_BYTES_PER_PLAYER_PER_TICK = 200000;
 
     private final Map<Integer, SyncGroup> activeGroups = new ConcurrentHashMap<>();
     private final Queue<SpoofTask> pendingSpoofs = new ConcurrentLinkedQueue<>();
-    private final Map<UUID, Queue<PacketWrapper<?>>> userPacketQueues = new ConcurrentHashMap<>();
+    private final Map<User, Queue<PacketWrapper<?>>> userPacketQueues = new ConcurrentHashMap<>();
 
     private ScheduledExecutorService executorService;
     private BukkitTask visibilityTask;
@@ -56,7 +58,7 @@ public class RenderManager {
 
         executorService.scheduleWithFixedDelay(this::tickAll, 20, 20, TimeUnit.MILLISECONDS);
 
-        visibilityTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+        visibilityTask = Bukkit.getScheduler().runTaskTimerAsynchronously(plugin, () -> {
             for (SyncGroup group : activeGroups.values()) {
                 group.updateVisibility();
             }
@@ -82,20 +84,14 @@ public class RenderManager {
                 }
             }
 
-            Iterator<Map.Entry<UUID, Queue<PacketWrapper<?>>>> iterator = userPacketQueues.entrySet().iterator();
+            Iterator<Map.Entry<User, Queue<PacketWrapper<?>>>> iterator = userPacketQueues.entrySet().iterator();
             while (iterator.hasNext()) {
-                Map.Entry<UUID, Queue<PacketWrapper<?>>> entry = iterator.next();
-                UUID uuid = entry.getKey();
+                Map.Entry<User, Queue<PacketWrapper<?>>> entry = iterator.next();
+                User user = entry.getKey();
                 Queue<PacketWrapper<?>> queue = entry.getValue();
 
-                org.bukkit.entity.Player player = org.bukkit.Bukkit.getPlayer(uuid);
-                if (player == null || !player.isOnline()) {
-                    iterator.remove();
-                    continue;
-                }
-
-                User user = PacketEvents.getAPI().getPlayerManager().getUser(player);
-                if (user == null) {
+                Object rawChannel = user.getChannel();
+                if (!(rawChannel instanceof Channel channel) || !channel.isActive()) {
                     iterator.remove();
                     continue;
                 }
@@ -106,10 +102,26 @@ public class RenderManager {
                 }
 
                 int sent = 0;
+                int sentBytes = 0;
                 PacketWrapper<?> packet;
-                while (sent < MAX_PACKETS_PER_PLAYER_PER_TICK && (packet = queue.poll()) != null) {
+
+                while (sent < MAX_PACKETS_PER_PLAYER_PER_TICK && sentBytes < MAX_BYTES_PER_PLAYER_PER_TICK) {
+                    packet = queue.peek();
+                    if (packet == null) break;
+
+                    int pktSize = 8192;
+                    if (packet instanceof ZeroCopyMapWrapper mapPacket) {
+                        pktSize = mapPacket.getDelta().packetBuf().readableBytes() + 16;
+                    }
+
+                    if (sentBytes + pktSize > MAX_BYTES_PER_PLAYER_PER_TICK && sentBytes > 0) {
+                        break;
+                    }
+
+                    queue.poll();
                     user.sendPacket(packet);
                     sent++;
+                    sentBytes += pktSize;
                 }
             }
         } catch (Exception e) {
@@ -119,7 +131,9 @@ public class RenderManager {
     }
 
     public void enqueuePacket(@NotNull UUID uuid, @NotNull PacketWrapper<?> packet) {
-        userPacketQueues.computeIfAbsent(uuid, k -> new ConcurrentLinkedQueue<>()).add(packet);
+        User user = chunkViewerTracker.getUser(uuid);
+        if (user == null) return;
+        userPacketQueues.computeIfAbsent(user, k -> new ConcurrentLinkedQueue<>()).add(packet);
     }
 
     public void queueSpoof(@NotNull User user, @NotNull FrameNode node) {
@@ -128,7 +142,6 @@ public class RenderManager {
 
     public void registerSyncGroup(int syncGroupID, @NotNull SyncGroup group) {
         group.updateVisibility();
-
         activeGroups.put(syncGroupID, group);
     }
 
@@ -153,6 +166,15 @@ public class RenderManager {
 
         activeGroups.clear();
         pendingSpoofs.clear();
+
+        for (Queue<PacketWrapper<?>> queue : userPacketQueues.values()) {
+            PacketWrapper<?> packet;
+            while ((packet = queue.poll()) != null) {
+                if (packet instanceof ZeroCopyMapWrapper mapPacket) {
+                    mapPacket.getDelta().freeMemory();
+                }
+            }
+        }
         userPacketQueues.clear();
     }
 }

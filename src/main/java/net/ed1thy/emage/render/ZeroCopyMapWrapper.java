@@ -14,11 +14,15 @@ public class ZeroCopyMapWrapper extends PacketWrapper<ZeroCopyMapWrapper> {
         this.delta = delta;
     }
 
+    public DeltaFrame getDelta() {
+        return delta;
+    }
+
     @Override
     public void write() {
         ByteBuf nettyBuf = (ByteBuf) getBuffer();
-        nettyBuf.writeBytes(delta.packetBuf(), 0, delta.packetBuf().readableBytes());
-    }
+        ByteBuf deltaBuf = delta.packetBuf();
+        nettyBuf.writeBytes(deltaBuf, deltaBuf.readerIndex(), deltaBuf.readableBytes());    }
 
     @Override
     public void read() {}

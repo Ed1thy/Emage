@@ -68,7 +68,7 @@ public class MapMetadataRepository {
     }
 
     public List<UUID> getPlacedFramesInChunk(UUID worldUuid, int chunkX, int chunkZ) throws SQLException {
-        List<UUID> uuids = new java.util.ArrayList<>();
+        List<UUID> uuids = new ArrayList<>();
         String sql = "SELECT frame_uuid FROM emage_placed_frames WHERE world_uuid = ? AND chunk_x = ? AND chunk_z = ?";
         try (Connection conn = dbManager.getConnection(); PreparedStatement ps = conn.prepareStatement(sql)) {
             ps.setString(1, worldUuid.toString());
@@ -115,22 +115,47 @@ public class MapMetadataRepository {
     @NotNull
     public List<Integer> allocateVirtualMapIds(int syncGroupId, int amount) throws SQLException {
         List<Integer> allocatedIds = new ArrayList<>(amount);
-        String sql = "INSERT INTO emage_maps (sync_group_id) VALUES (?)";
         Connection conn = null;
         boolean initialAutoCommit = true;
         try {
             conn = dbManager.getConnection();
             initialAutoCommit = conn.getAutoCommit();
             conn.setAutoCommit(false);
-            try (PreparedStatement ps = conn.prepareStatement(sql, Statement.RETURN_GENERATED_KEYS)) {
-                for (int i = 0; i < amount; i++) {
-                    ps.setInt(1, syncGroupId);
-                    ps.executeUpdate();
-                    try (ResultSet rs = ps.getGeneratedKeys()) {
-                        if (rs.next()) allocatedIds.add(rs.getInt(1));
+
+            int firstId;
+            String sqlFirst = "INSERT INTO emage_maps (sync_group_id) VALUES (?)";
+            try (PreparedStatement ps = conn.prepareStatement(sqlFirst, Statement.RETURN_GENERATED_KEYS)) {
+                ps.setInt(1, syncGroupId);
+                ps.executeUpdate();
+                try (ResultSet rs = ps.getGeneratedKeys()) {
+                    if (rs.next()) {
+                        firstId = rs.getInt(1);
+                    } else {
+                        throw new SQLException("Failed to retrieve auto-generated map ID from SQLite.");
                     }
                 }
             }
+            allocatedIds.add(firstId);
+
+            if (amount > 1) {
+                StringBuilder sqlRest = new StringBuilder("INSERT INTO emage_maps (sync_group_id) VALUES ");
+                for (int i = 1; i < amount; i++) {
+                    if (i > 1) sqlRest.append(", ");
+                    sqlRest.append("(?)");
+                }
+
+                try (PreparedStatement ps = conn.prepareStatement(sqlRest.toString())) {
+                    for (int i = 1; i < amount; i++) {
+                        ps.setInt(i, syncGroupId);
+                    }
+                    ps.executeUpdate();
+                }
+
+                for (int i = 1; i < amount; i++) {
+                    allocatedIds.add(firstId + i);
+                }
+            }
+
             conn.commit();
         } catch (SQLException e) {
             if (conn != null) try { conn.rollback(); } catch (SQLException ex) { e.addSuppressed(ex); }

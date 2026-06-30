@@ -24,6 +24,7 @@ public class MessageManager {
     private Component metadataNotFound;
     private Component gridRemoved;
     private Component cleanupFailed;
+    private Component configReloaded;
     private Component smartUrlHint;
 
     private String updateAvailableRaw;
@@ -63,6 +64,7 @@ public class MessageManager {
         this.metadataNotFound = prefix.append(miniMessage.deserialize(config.getString("messages.metadata-not-found", "<red>Failed to find grid metadata in database.")));
         this.gridRemoved = prefix.append(miniMessage.deserialize(config.getString("messages.grid-removed", "<green>Grid removed successfully.")));
         this.cleanupFailed = prefix.append(miniMessage.deserialize(config.getString("messages.cleanup-failed", "<red>Failed to cleanup files.")));
+        this.configReloaded = prefix.append(miniMessage.deserialize(config.getString("messages.config-reloaded", "<green>Configuration reloaded successfully.")));
         this.smartUrlHint = prefix.append(miniMessage.deserialize(config.getString("messages.smart-url-hint", "<gray><i>Hint: Ensure you used a direct image link ending in .png, .jpg, or .gif (Not an imgur/discord viewer link!)</i>")));
 
         this.processingStartedRaw = config.getString("messages.processing-started", "<aqua>Processing image for <color:#4CABBB><width>x<height></color> grid. Please wait...");
@@ -111,6 +113,11 @@ public class MessageManager {
     public void sendMetadataNotFound(@NotNull Audience audience) { audience.sendMessage(this.metadataNotFound); playSafely(audience, errorSound); }
     public void sendGridRemoved(@NotNull Audience audience) { audience.sendMessage(this.gridRemoved); playSafely(audience, successSound); }
     public void sendCleanupFailed(@NotNull Audience audience) { audience.sendMessage(this.cleanupFailed); playSafely(audience, errorSound); }
+
+    public void sendConfigReloaded(@NotNull Audience audience) {
+        audience.sendMessage(this.configReloaded);
+        playSafely(audience, successSound);
+    }
 
     public void sendProcessing(@NotNull Audience audience, int width, int height) {
         audience.sendMessage(prefix.append(miniMessage.deserialize(

@@ -24,6 +24,7 @@ To display an image, place Item Frames on a wall in a rectangular grid. Look at 
 | `/emage apply-grid <columns> <rows> <url>` | Manually specify the grid size to apply the image/GIF. |
 | `/emage apply <url>`                       | Auto-detects the frame grid and applies the image/GIF. |
 | `/emage remove`                            | Remove the grid and its files.                         |
+| `/emage reload`                            | Reload the configuration.                              |
 
 ## Building
 ```bash

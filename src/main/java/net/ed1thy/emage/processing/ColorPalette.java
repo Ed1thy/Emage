@@ -1,6 +1,8 @@
 package net.ed1thy.emage.processing;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.stream.IntStream;
 
 public class ColorPalette {
@@ -9,6 +11,8 @@ public class ColorPalette {
     private final int[] mcColorsRGB = new int[256];
     private final double[][] mcColorsOklab = new double[256][3];
     private volatile boolean isReady = false;
+
+    private final ForkJoinPool customPool = new ForkJoinPool(Math.max(1, Runtime.getRuntime().availableProcessors() - 1));
 
     private static final int[] BASE_COLORS = {
             0x000000, 0x7FB238, 0xF7E9A3, 0xC7C7C7, 0xFF0000, 0xA0A0FF, 0xA7A7A7, 0x007C00,
@@ -51,7 +55,7 @@ public class ColorPalette {
 
                 final int finalMaxId = maxId;
 
-                IntStream.range(0, 64).parallel().forEach(rIdx -> {
+                customPool.submit(() -> IntStream.range(0, 64).parallel().forEach(rIdx -> {
                     int r = (rIdx << 2) + 2;
                     for (int gIdx = 0; gIdx < 64; gIdx++) {
                         int g = (gIdx << 2) + 2;
@@ -84,10 +88,12 @@ public class ColorPalette {
                             colorMap[index] = bestColor;
                         }
                     }
-                });
+                })).get();
 
                 isReady = true;
-            } catch (Exception e) {
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            } catch (ExecutionException e) {
                 e.printStackTrace();
             }
         });
@@ -123,5 +129,9 @@ public class ColorPalette {
 
     public boolean isReady() {
         return isReady;
+    }
+
+    public void shutdown() {
+        customPool.shutdown();
     }
 }

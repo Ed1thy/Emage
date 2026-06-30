@@ -11,7 +11,6 @@ storage:
   database:
     file-name: "emage_meta.db"
     pool-size: 2
-  map-data-directory: "map_data"
 
 quality:
   max-gif-frames: 240
@@ -30,7 +29,7 @@ cache:
   expire-minutes: 30
 
 rate-limits:
-  cooldown-seconds: 10
+  cooldown-seconds: 5
   max-concurrent-tasks: 3
 
 feedback:
@@ -48,7 +47,6 @@ messages:
   invalid-url: "<red>Invalid or disallowed URL provided."
   only-players: "<red>Only players can use this command."
   processing-started: "<color:#fd6039>Processing image for <color:#f3c6bb><width>x<height></color> grid. Please wait..."
-  # NEW: Added Clickable Undo text
   success: "<green>Successfully applied image to <color:#f3c6bb><total></color> frame(s)! <gray>[<red><click:run_command:'/emage remove'><hover:show_text:'Click to remove this render'>Undo</hover></click></red>]</gray>"
   error: "<red>An error occurred: <gray><error>"
   process-error: "<red>Failed to process image: <gray><error>"
@@ -64,6 +62,7 @@ messages:
   metadata-not-found: "<red>Failed to find grid metadata in database."
   grid-removed: "<green>Grid removed successfully."
   cleanup-failed: "<red>Failed to cleanup files."
+  config-reloaded: "<green>Configuration and messages reloaded successfully."
   update-available: "<yellow>A new version of <gradient:#F57E3A:#CB6E38:#C36220>Emage</gradient> (<green><version></green>) is available! You are running <red><current_version></red>. Download it here: <click:open_url:'<url>'><aqua><u><url></u></aqua></click>"
   protected-frame: "<red>This Emage is protected. Use <color:#f3c6bb>/emage remove</color> to delete it."
   smart-url-hint: "<gray><i>Hint: Ensure you used a direct image link ending in .png, .jpg, or .gif (Not an imgur/discord link!)</i>"

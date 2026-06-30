@@ -40,6 +40,12 @@ public class ImageDownloader {
 
         try {
             URI uri = URI.create(targetUrl);
+            String scheme = uri.getScheme();
+
+            if (scheme == null || (!scheme.equalsIgnoreCase("http") && !scheme.equalsIgnoreCase("https"))) {
+                return CompletableFuture.failedFuture(new SecurityException("Security Exception: URL scheme must be 'http' or 'https'."));
+            }
+
             String host = uri.getHost();
 
             dnsChecker.verifyHostSafety(host);

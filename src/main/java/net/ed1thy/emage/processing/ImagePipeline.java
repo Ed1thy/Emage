@@ -34,6 +34,11 @@ public class ImagePipeline {
         this.storage = storage;
     }
 
+    public void shutdown() {
+        vtExecutor.shutdownNow();
+        dither.shutdown();
+    }
+
     private void writeVarInt(ByteBuf buf, int value) {
         while ((value & -128) != 0) {
             buf.writeByte(value & 127 | 128);
@@ -64,14 +69,10 @@ public class ImagePipeline {
                 for (int frameIndex = 0; frameIndex < totalFramesCount; frameIndex++) {
                     BufferedImage rawFrame = decoder.getFrame(frameIndex);
 
-                    double scaleX = (double) totalWidth / rawFrame.getWidth();
-                    double scaleY = (double) totalHeight / rawFrame.getHeight();
-                    double scale = Math.min(scaleX, scaleY);
-
-                    int drawW = (int) Math.round(rawFrame.getWidth() * scale);
-                    int drawH = (int) Math.round(rawFrame.getHeight() * scale);
-                    int offsetX = (totalWidth - drawW) / 2;
-                    int offsetY = (totalHeight - drawH) / 2;
+                    int drawW = totalWidth;
+                    int drawH = totalHeight;
+                    int offsetX = 0;
+                    int offsetY = 0;
 
                     BufferedImage scaledImage = new BufferedImage(totalWidth, totalHeight, BufferedImage.TYPE_INT_ARGB);
                     Graphics2D gFinal = scaledImage.createGraphics();
@@ -187,7 +188,7 @@ public class ImagePipeline {
         int updateWidth = (maxX - minX) + 1;
         int updateHeight = (maxY - minY) + 1;
 
-        ByteBuf packetBuf = PooledByteBufAllocator.DEFAULT.directBuffer(updateWidth * updateHeight + 16);
+        ByteBuf packetBuf = PooledByteBufAllocator.DEFAULT.directBuffer(updateWidth * updateHeight + 18);
         writeVarInt(packetBuf, mapId);
         packetBuf.writeByte(0);
         packetBuf.writeBoolean(true);
